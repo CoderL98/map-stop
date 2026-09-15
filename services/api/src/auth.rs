@@ -83,7 +83,7 @@ pub fn decode_token(token: &str, secret: &str) -> Result<Claims, AppError> {
 pub struct AppState {
     pub pool: SqlitePool,
     pub jwt_secret: String,
-    pub graph: std::sync::Arc<crate::routing::RoadGraph>,
+    pub routing: std::sync::Arc<crate::routing::RoutingService>,
     pub http: reqwest::Client,
     pub geocode_limiter: crate::routes::geocode::GeocodeLimiter,
 }

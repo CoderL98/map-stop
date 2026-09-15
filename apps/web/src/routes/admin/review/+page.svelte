@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import type { UploadItem } from '$lib/types';
+	import type { UploadItem, RoutingMeta} from '$lib/types';
 	import type { Map as LMap, Circle, Marker } from 'leaflet';
 
 	type StatusTab = 'pending' | 'approved' | 'rejected' | 'all';
@@ -19,6 +19,7 @@
 	let previewCircle: Circle | null = null;
 	let previewMarker: Marker | null = null;
 	let Lref: typeof import('leaflet') | null = null;
+	let crsLabel = $state('CRS 未知');
 
 	const pendingIds = $derived(items.filter((i) => i.status === 'pending').map((i) => i.id));
 	const selectedPending = $derived(pendingIds.filter((id) => selected[id]));
@@ -50,8 +51,12 @@
 		map = L.map(mapEl).setView([30.26, 120.15], 13);
 		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 			maxZoom: 19,
-			attribution: '&copy; OpenStreetMap'
+			attribution: '&copy; OpenStreetMap · ' + crsLabel
 		}).addTo(map);
+		try {
+			const meta = await api<RoutingMeta>('/meta/routing');
+			crsLabel = `CRS ${meta.crs} · ${meta.provider}`;
+		} catch { /* ignore */ }
 	}
 
 	function showOnMap(it: UploadItem) {

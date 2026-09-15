@@ -1,10 +1,15 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken } from '$lib/api';
-	import type { CustomPoint, DemoBounds, GeocodeHit, PlanResult, SystemPoint } from '$lib/types';
+	import { loadAmap } from '$lib/amap';
+	import type { CustomPoint, GeocodeHit, PlanResult, RoutingMeta, SystemPoint } from '$lib/types';
 	import type { Map as LMap, LayerGroup, Polyline, Marker, Rectangle } from 'leaflet';
 
 	let mapEl: HTMLDivElement;
+	let mapKind: 'amap' | 'leaflet' = $state('leaflet');
+	let routingMeta = $state<RoutingMeta | null>(null);
+
+	// Leaflet refs
 	let map: LMap | null = null;
 	let routeLayer: Polyline | null = null;
 	let markersLayer: LayerGroup | null = null;
@@ -13,6 +18,14 @@
 	let startMarker: Marker | null = null;
 	let endMarker: Marker | null = null;
 	let Lref: typeof import('leaflet') | null = null;
+
+	// AMap refs
+	let AMapRef: any = null;
+	let amap: any = null;
+	let amapStartMarker: any = null;
+	let amapEndMarker: any = null;
+	let amapRouteLine: any = null;
+	let amapAvoidOverlays: any[] = [];
 
 	let mode = $state<'driving' | 'walking' | 'cycling'>('driving');
 	let start = $state<{ lat: number; lon: number } | null>(null);
@@ -24,8 +37,7 @@
 	let error = $state('');
 	let info = $state('');
 	let loading = $state(false);
-	let boundsNote = $state('杭州西湖演示路网');
-	let demoBounds = $state<DemoBounds | null>(null);
+	let boundsNote = $state('加载路由元数据…');
 
 	let startQuery = $state('');
 	let endQuery = $state('');
@@ -40,6 +52,54 @@
 			window.location.href = '/login';
 			return;
 		}
+
+		try {
+			routingMeta = await api<RoutingMeta>('/meta/routing');
+		} catch {
+			try {
+				routingMeta = await api<RoutingMeta>('/meta/demo-bounds');
+			} catch {
+				/* ignore */
+			}
+		}
+
+		const useAmap =
+			!!routingMeta?.amap_js_key &&
+			(routingMeta.provider === 'gaode' || !!routingMeta.amap_configured);
+
+		if (useAmap && routingMeta?.amap_js_key) {
+			mapKind = 'amap';
+			try {
+				AMapRef = await loadAmap({
+					jsKey: routingMeta.amap_js_key,
+					securityJsCode: routingMeta.amap_security_js_code
+				});
+				await initAmap();
+			} catch (e) {
+				console.warn('AMap load failed, falling back to Leaflet', e);
+				mapKind = 'leaflet';
+				await initLeaflet();
+			}
+		} else {
+			mapKind = 'leaflet';
+			await initLeaflet();
+		}
+
+		if (routingMeta) {
+			const warn = routingMeta.fallback_warning ? ` ⚠ ${routingMeta.fallback_warning}` : '';
+			boundsNote = `${routingMeta.region} · 引擎 ${routingMeta.engine} · CRS ${routingMeta.crs}${warn} — ${routingMeta.note}`;
+		}
+
+		await refreshPoints();
+		redrawAvoids();
+	});
+
+	onDestroy(() => {
+		map?.remove();
+		amap?.destroy?.();
+	});
+
+	async function initLeaflet() {
 		const L = (await import('leaflet')).default;
 		Lref = L as unknown as typeof import('leaflet');
 		await import('leaflet/dist/leaflet.css');
@@ -51,10 +111,13 @@
 			shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
 		});
 
-		map = L.map(mapEl).setView([30.26, 120.15], 13);
+		const center = routingMeta?.center ?? { lat: 30.26, lon: 120.15 };
+		map = L.map(mapEl).setView([center.lat, center.lon], 13);
 		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 			maxZoom: 19,
-			attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+			attribution:
+				'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' +
+				(routingMeta ? ` · CRS ${routingMeta.crs}` : '')
 		}).addTo(map);
 		markersLayer = L.layerGroup().addTo(map);
 		avoidLayer = L.layerGroup().addTo(map);
@@ -62,24 +125,12 @@
 		map.on('click', (e) => {
 			if (!pick) return;
 			const { lat, lng } = e.latlng;
-			if (pick === 'start') {
-				start = { lat, lon: lng };
-				startQuery = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-				startHits = [];
-			} else {
-				end = { lat, lon: lng };
-				endQuery = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-				endHits = [];
-			}
-			redrawMarkers();
+			setPoint(pick, lat, lng);
 			pick = pick === 'start' ? 'end' : null;
 		});
 
-		try {
-			const meta = await api<DemoBounds>('/meta/demo-bounds');
-			demoBounds = meta;
-			boundsNote = `${meta.region} — ${meta.note}`;
-			const b = meta.bounds;
+		if (routingMeta?.provider === 'embedded' && routingMeta.bounds) {
+			const b = routingMeta.bounds;
 			boundsRect = L.rectangle(
 				[
 					[b.lat_min, b.lon_min],
@@ -96,17 +147,38 @@
 				.bindTooltip('演示路网有效范围')
 				.addTo(map);
 			map.fitBounds(boundsRect.getBounds(), { padding: [20, 20] });
-		} catch {
-			/* ignore */
 		}
+	}
 
-		await refreshPoints();
-		redrawAvoids();
-	});
+	async function initAmap() {
+		const AMap = AMapRef;
+		const center = routingMeta?.center ?? { lat: 30.26, lon: 120.15 };
+		amap = new AMap.Map(mapEl, {
+			zoom: 13,
+			center: [center.lon, center.lat],
+			viewMode: '2D'
+		});
+		amap.on('click', (e: any) => {
+			if (!pick) return;
+			const lng = e.lnglat.getLng();
+			const lat = e.lnglat.getLat();
+			setPoint(pick, lat, lng);
+			pick = pick === 'start' ? 'end' : null;
+		});
+	}
 
-	onDestroy(() => {
-		map?.remove();
-	});
+	function setPoint(which: 'start' | 'end', lat: number, lon: number) {
+		if (which === 'start') {
+			start = { lat, lon };
+			startQuery = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+			startHits = [];
+		} else {
+			end = { lat, lon };
+			endQuery = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+			endHits = [];
+		}
+		redrawMarkers();
+	}
 
 	async function refreshPoints() {
 		systemPoints = await api<SystemPoint[]>('/system-points');
@@ -132,6 +204,10 @@
 	}
 
 	function redrawMarkers() {
+		if (mapKind === 'amap' && amap && AMapRef) {
+			redrawAmapMarkers();
+			return;
+		}
 		const L = Lref;
 		if (!L || !markersLayer || !map) return;
 		if (startMarker) {
@@ -173,7 +249,49 @@
 		}
 	}
 
+	function redrawAmapMarkers() {
+		const AMap = AMapRef;
+		if (amapStartMarker) {
+			amap.remove(amapStartMarker);
+			amapStartMarker = null;
+		}
+		if (amapEndMarker) {
+			amap.remove(amapEndMarker);
+			amapEndMarker = null;
+		}
+		if (start) {
+			amapStartMarker = new AMap.Marker({
+				position: [start.lon, start.lat],
+				draggable: true,
+				title: '起点',
+				map: amap
+			});
+			amapStartMarker.on('dragend', () => {
+				const p = amapStartMarker.getPosition();
+				start = { lat: p.getLat(), lon: p.getLng() };
+				startQuery = `${start.lat.toFixed(5)}, ${start.lon.toFixed(5)}`;
+			});
+		}
+		if (end) {
+			amapEndMarker = new AMap.Marker({
+				position: [end.lon, end.lat],
+				draggable: true,
+				title: '终点',
+				map: amap
+			});
+			amapEndMarker.on('dragend', () => {
+				const p = amapEndMarker.getPosition();
+				end = { lat: p.getLat(), lon: p.getLng() };
+				endQuery = `${end.lat.toFixed(5)}, ${end.lon.toFixed(5)}`;
+			});
+		}
+	}
+
 	function redrawAvoids() {
+		if (mapKind === 'amap' && amap && AMapRef) {
+			redrawAmapAvoids();
+			return;
+		}
 		const L = Lref;
 		if (!L || !avoidLayer || !map) return;
 		avoidLayer.clearLayers();
@@ -198,6 +316,38 @@
 			})
 				.bindTooltip(`自定义: ${p.name}（${p.radius_m}m）`)
 				.addTo(avoidLayer);
+		}
+	}
+
+	function redrawAmapAvoids() {
+		const AMap = AMapRef;
+		if (amapAvoidOverlays.length) {
+			amap.remove(amapAvoidOverlays);
+			amapAvoidOverlays = [];
+		}
+		for (const p of systemPoints.filter((x) => x.enabled)) {
+			const c = new AMap.Circle({
+				center: [p.lon, p.lat],
+				radius: p.radius_m,
+				strokeColor: '#c62828',
+				fillColor: '#ef5350',
+				fillOpacity: 0.25,
+				strokeWeight: 1
+			});
+			c.setMap(amap);
+			amapAvoidOverlays.push(c);
+		}
+		for (const p of customPoints.filter((x) => x.selected)) {
+			const c = new AMap.Circle({
+				center: [p.lon, p.lat],
+				radius: p.radius_m,
+				strokeColor: '#f57c00',
+				fillColor: '#ffb74d',
+				fillOpacity: 0.25,
+				strokeWeight: 1
+			});
+			c.setMap(amap);
+			amapAvoidOverlays.push(c);
 		}
 	}
 
@@ -230,22 +380,24 @@
 	}
 
 	function applyHit(which: 'start' | 'end', hit: GeocodeHit) {
-		const pt = { lat: hit.lat, lon: hit.lon };
+		setPoint(which, hit.lat, hit.lon);
 		if (which === 'start') {
-			start = pt;
 			startQuery = hit.name || hit.display_name.split(',')[0] || hit.display_name;
 			startHits = [];
 			if (!end) pick = 'end';
 			else pick = null;
 		} else {
-			end = pt;
 			endQuery = hit.name || hit.display_name.split(',')[0] || hit.display_name;
 			endHits = [];
 			pick = null;
 		}
-		redrawMarkers();
-		map?.panTo([pt.lat, pt.lon], { animate: true });
-		if (map && map.getZoom() < 14) map.setZoom(14);
+		if (mapKind === 'amap' && amap) {
+			amap.setCenter([hit.lon, hit.lat]);
+			if (amap.getZoom() < 14) amap.setZoom(14);
+		} else {
+			map?.panTo([hit.lat, hit.lon], { animate: true });
+			if (map && map.getZoom() < 14) map.setZoom(14);
+		}
 	}
 
 	function clearPoint(which: 'start' | 'end') {
@@ -273,7 +425,6 @@
 		}
 		loading = true;
 		try {
-			const L = Lref ?? ((await import('leaflet')).default as unknown as typeof import('leaflet'));
 			const res = await api<PlanResult>('/plan', {
 				method: 'POST',
 				json: {
@@ -284,24 +435,45 @@
 				}
 			});
 			result = res;
-			if (routeLayer) {
-				routeLayer.remove();
-				routeLayer = null;
-			}
-			routeLayer = L.polyline(res.properties.polyline, { color: '#0b6bcb', weight: 5 }).addTo(map!);
-			map!.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
-			// keep avoid circles + markers visible
+			drawRoute(res.properties.polyline);
 			redrawAvoids();
 			redrawMarkers();
-			info = `距离 ${(res.properties.distance_m / 1000).toFixed(2)} km · 约 ${Math.round(res.properties.duration_s / 60)} 分钟 · 生效躲避点 ${res.properties.avoid_count} 个`;
+			info = `距离 ${(res.properties.distance_m / 1000).toFixed(2)} km · 约 ${Math.round(res.properties.duration_s / 60)} 分钟 · 生效躲避点 ${res.properties.avoid_count} 个 · ${res.properties.provider || routingMeta?.provider || ''}`;
 		} catch (err) {
 			error = err instanceof Error ? err.message : '规划失败';
-			if (routeLayer) {
-				routeLayer.remove();
-				routeLayer = null;
-			}
+			clearRoute();
 		} finally {
 			loading = false;
+		}
+	}
+
+	function drawRoute(polyline: [number, number][]) {
+		clearRoute();
+		if (mapKind === 'amap' && amap && AMapRef) {
+			const path = polyline.map(([lat, lon]) => [lon, lat]);
+			amapRouteLine = new AMapRef.Polyline({
+				path,
+				strokeColor: '#0b6bcb',
+				strokeWeight: 5,
+				map: amap
+			});
+			amap.setFitView([amapRouteLine]);
+			return;
+		}
+		const L = Lref;
+		if (!L || !map) return;
+		routeLayer = L.polyline(polyline, { color: '#0b6bcb', weight: 5 }).addTo(map);
+		map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
+	}
+
+	function clearRoute() {
+		if (amapRouteLine && amap) {
+			amap.remove(amapRouteLine);
+			amapRouteLine = null;
+		}
+		if (routeLayer) {
+			routeLayer.remove();
+			routeLayer = null;
 		}
 	}
 
@@ -326,6 +498,14 @@
 	<div class="card">
 		<h1 style="margin:0 0 0.5rem;">路线规划</h1>
 		<p style="margin:0;color:#64748b;font-size:0.9rem;">{boundsNote}</p>
+		{#if routingMeta}
+			<p class="meta-badges">
+				<span class="badge">provider: {routingMeta.provider}</span>
+				<span class="badge">CRS: {routingMeta.crs}</span>
+				<span class="badge">地图: {mapKind === 'amap' ? '高德 JS' : 'Leaflet/OSM'}</span>
+				<span class="badge">搜索: {routingMeta.geocoder || '—'}</span>
+			</p>
+		{/if}
 
 		<div class="search-grid" style="margin-top:0.85rem;">
 			<div class="search-col">
@@ -407,7 +587,11 @@
 			<button type="button" onclick={plan} disabled={loading}>{loading ? '规划中…' : '规划路线'}</button>
 		</div>
 		<p style="margin:0.5rem 0 0;font-size:0.85rem;color:#64748b;">
-			提示：蓝色虚线框为演示有效范围；可搜索地名、地图点击、或拖动蓝/红标记调整起终点。
+			{#if mapKind === 'amap'}
+				高德地图（GCJ-02）：请用本页点选/搜索，勿粘贴未转换的 WGS84/OSM 坐标。
+			{:else}
+				Leaflet + OSM；若启用高德算路请同时配置 AMAP_JS_KEY 以保持坐标一致。
+			{/if}
 		</p>
 		{#if error}<p class="err">{error}</p>{/if}
 		{#if result}
@@ -416,6 +600,9 @@
 				<div><span class="stats-label">预计时长</span><strong>{Math.round(result.properties.duration_s / 60)} 分钟</strong></div>
 				<div><span class="stats-label">生效躲避</span><strong>{result.properties.avoid_count} 个</strong></div>
 				<div><span class="stats-label">方式</span><strong>{mode === 'driving' ? '驾车' : mode === 'walking' ? '步行' : '骑行'}</strong></div>
+				{#if result.properties.provider}
+					<div><span class="stats-label">算路</span><strong>{result.properties.provider}</strong></div>
+				{/if}
 			</div>
 		{:else if info}
 			<p class="ok">{info}</p>
@@ -451,14 +638,28 @@
 		{/if}
 		<p style="font-size:0.85rem;color:#64748b;">
 			红色圆：已启用系统点；橙色圆：已勾选自定义点。服务端硬避开并二次校验折线。
-			{#if demoBounds}
-				演示引擎：{demoBounds.engine}。
+			{#if routingMeta}
+				引擎：{routingMeta.engine} · CRS：{routingMeta.crs}。
 			{/if}
 		</p>
 	</div>
 </div>
 
 <style>
+	.meta-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		margin: 0.5rem 0 0;
+	}
+	.badge {
+		font-size: 0.75rem;
+		background: #f1f5f9;
+		border: 1px solid #e2e8f0;
+		border-radius: 999px;
+		padding: 0.15rem 0.55rem;
+		color: #334155;
+	}
 	.search-grid {
 		display: grid;
 		grid-template-columns: 1fr 1fr;

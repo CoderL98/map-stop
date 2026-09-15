@@ -8,3 +8,12 @@ data/*.db-*
 **/dist/
 *.log
 .DS_Store
+
+# Aborted / local GraphHopper & OSM extracts (not used in v1 Gaode path)
+services/graphhopper/
+third_party/
+data/osm/
+data/graphhopper/
+*.osm.pbf
+*.jar
+.env.local

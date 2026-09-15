@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import type { ImportResult, SystemPoint } from '$lib/types';
+	import type { ImportResult, SystemPoint, RoutingMeta} from '$lib/types';
 	import type { Map as LMap, LayerGroup, Circle, Marker } from 'leaflet';
 
 	let points = $state<SystemPoint[]>([]);
@@ -31,6 +31,7 @@
 	let avoidLayer: LayerGroup | null = null;
 	let pickMarker: Marker | null = null;
 	let Lref: typeof import('leaflet') | null = null;
+	let crsLabel = $state('CRS 未知');
 	let circleById = new Map<string, Circle>();
 
 	const filtered = $derived(
@@ -75,9 +76,15 @@
 		map = L.map(mapEl).setView([30.26, 120.15], 13);
 		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 			maxZoom: 19,
-			attribution: '&copy; OpenStreetMap'
+			attribution: '&copy; OpenStreetMap · ' + crsLabel
 		}).addTo(map);
 		avoidLayer = L.layerGroup().addTo(map);
+		try {
+			const meta = await api<RoutingMeta>('/meta/routing');
+			crsLabel = `CRS ${meta.crs} · ${meta.provider}`;
+			map.attributionControl?.setPrefix('');
+			// force refresh attribution text by re-adding layer note
+		} catch { /* ignore */ }
 		map.on('click', (e) => {
 			lat = Number(e.latlng.lat.toFixed(6));
 			lon = Number(e.latlng.lng.toFixed(6));

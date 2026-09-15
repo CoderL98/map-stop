@@ -1,7 +1,7 @@
 # map-stop 产品与技术说明（v0.1）
 
 > 仓库：https://github.com/CoderL98/map-stop  
-> 状态：需求定稿候选，已确认技术栈与核心业务规则  
+> 状态：v1 转向高德算路 + 可插拔 RoutingProvider；开源自托管为二期  
 > 语言：产品界面与文档默认中文
 
 ---
@@ -16,8 +16,8 @@
 
 | 约束 | 约定 |
 |------|------|
-| 版权与费用 | 避免商业地图版权纠纷、追收授权费与侵权风险 |
-| 地图实现 | 基于第三方地图能力（不自绘底图），但**不采用**高德/百度/腾讯商用 SDK 作为首版默认 |
+| 版权与费用 | v1 使用高德须遵守其条款与配额/商用授权；二期可切开源自托管以降依赖 |
+| 地图实现 | v1：**高德** Web 服务 + JS API（降低初期成本）；同一接口预留二期自托管开源路由；不默认百度/腾讯 |
 | 躲避语义 | 绝对不经过躲避点位，通过绕路实现；不可达则明确失败，不降级穿行 |
 | 点位来源 | 管理员配置/导入系统点；用户自定义；用户上传 → 审核 → 系统点 |
 
@@ -97,7 +97,7 @@
 
 ### 5.1 规划页（用户）
 
-1. 地图展示（OSM 底图 + 署名）
+1. 地图展示（高德 JS 优先；无 Key 时 Leaflet/OSM + CRS 标注）
 2. 设置起点 / 终点：点击地图、搜索地名、拖动标记
 3. 出行方式：驾车（默认）/ 步行 / 骑行
 4. 自定义躲避点列表：勾选、调半径、删除；地图上画圆
@@ -123,7 +123,7 @@
 - 组织/多租户、复杂权限
 - 多边形/线禁区编辑器
 - 原生 App、支付、社交
-- 高德 / 百度 / 腾讯商用 SDK
+- 百度 / 腾讯商用 SDK（高德已作为 v1 默认算路/底图选项）
 
 ---
 
@@ -131,46 +131,47 @@
 
 ```text
 浏览器
-  SvelteKit (pnpm) + Leaflet
+  SvelteKit (pnpm) + 高德 JS API 2.0（有 Key）/ Leaflet 回退
         │
         ▼
 Rust API
   认证 / 点位 / 审核 / 导入 / 规划编排与硬约束校验
         │
-        ├─ 数据库（账号、系统点、自定义点、上传与审核）
-        └─ 开源路由引擎（如 GraphHopper / Valhalla / OSRM）
-              └─ OSM 路网数据
+        ├─ 数据库（账号、系统点、自定义点、上传与审核）坐标 CRS 见 meta
+        └─ RoutingProvider（可插拔）
+              ├─ gaode      （v1 默认，高德 Web 服务路径规划）
+              ├─ embedded   （杭州网格 A*，无 Key 演示）
+              └─ opensource （二期 stub：GraphHopper / Valhalla）
 ```
 
 ### 6.1 前端
 
 - **SvelteKit** + **pnpm**
-- **Leaflet** + OpenStreetMap 瓦片（保留 © OpenStreetMap 署名）
-- 地名搜索：OSM 生态（Nominatim / Photon 等），遵守限流；生产可自建
-- 只请求自家 Rust API
+- 规划页：有 `AMAP_JS_KEY` 时用 **高德 JS API 2.0**；否则 Leaflet + OSM（标注 CRS）
+- 地名搜索：gaode 模式走高德输入提示/地理编码；embedded 走 Nominatim 代理
+- 只请求自家 Rust API；通过 `GET /api/meta/routing` 获知 provider / CRS / JS Key
 
 ### 6.2 后端
 
-- **尽量 Rust**：业务 API、认证、点位与审核、规划编排、几何校验均在 Rust
-- 路由引擎：优先选用支持 avoid 多边形/区域的开源方案；可以是独立进程，由 Rust 编排
-- 数据库：任选常见方案（如 PostgreSQL + 迁移），需支持账号与点位持久化
-- 认证：Session 或 JWT；密码安全存储（argon2 / 同等）
-- 管理员种子账号：环境变量初始化
+- **尽量 Rust**：业务 API、认证、点位与审核、规划编排、**所有 provider 的几何硬校验**均在 Rust
+- **RoutingProvider**：`ROUTING_PROVIDER` + `AMAP_WEB_KEY` 选择后端；开源引擎二期接入同一接口
+- 数据库：SQLite（可迁 PostgreSQL）；**高德路径下点位按 GCJ-02 存储**
+- 认证：JWT；密码 argon2；管理员种子账号环境变量初始化
 
 ### 6.3 工程形态
 
-- 建议目录：`apps/web`（SvelteKit）+ `services/api`（Rust）+ `docker-compose`（API、DB、路由引擎）
-- README（中文）：本地启动、环境变量、CSV 模板、OSM 署名、如何准备路网数据
-- `.env.example`：数据库、JWT/Session 密钥、种子管理员、路由引擎地址等
+- 目录：`apps/web` + `services/api`（`routing/{embedded,gaode,opensource}.rs`）
+- README：本地启动、高德 Key 申请、环境变量、CSV、版权与切换路径
+- `.env.example`：数据库、JWT、管理员、`ROUTING_PROVIDER`、`AMAP_*` 占位（勿提交真实 Key）
 
 ### 6.4 版权与费用策略
 
 | 组件 | 策略 |
 |------|------|
-| 底图 | OSM，按 ODbL 要求署名 |
-| 地理编码 | OSM 生态，遵守使用政策 |
-| 算路 | 开源引擎 + OSM 路网，可自托管 |
-| 商用地图 SDK | 首版不默认接入，避免授权与追费 |
+| 底图 / 算路（v1） | 高德：遵守高德开放平台条款与配额；商用需授权 |
+| 地理编码（v1） | 高德输入提示 / geo；embedded 回退 Nominatim |
+| 开源路径（二期） | GraphHopper/Valhalla + OSM，同一 RoutingProvider |
+| CRS | 高德路径 **GCJ-02**；勿与未转换 WGS84 混用 |
 
 ---
 
@@ -211,7 +212,7 @@ Rust API
 | 出行方式 | 驾车 / 步行 / 骑行 |
 | CSV 编码 | UTF-8 |
 | 登录方式 | 用户名或邮箱 + 密码 |
-| 地图与路由 | OSM + 开源路由，硬避开 |
+| 地图与路由 | v1 高德（可插拔）+ 硬避开；embedded 演示回退 |
 
 ---
 
@@ -220,7 +221,7 @@ Rust API
 - 软避开模式（允许短穿加罚）
 - 线/面禁区
 - 规划历史云端保存与分享
-- 国内商用底图「已授权」适配层
+- 自托管 GraphHopper/Valhalla 填满 opensource provider
 - 更细的组织与审计日志
 
 ---
@@ -230,3 +231,4 @@ Rust API
 | 版本 | 说明 |
 |------|------|
 | v0.1 | 汇总讨论：系统点+自定义+上传审核、硬避开、半径、OSM/开源路由避版权、Rust + SvelteKit + pnpm、正式登录双角色 |
+| v1.0 | 转向高德 Web/JS 为 v1 算路与底图；可插拔 RoutingProvider；opensource 二期预留 |

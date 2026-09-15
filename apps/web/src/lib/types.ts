@@ -55,13 +55,24 @@ export type PlanResult = {
 		mode: string;
 		avoid_count: number;
 		polyline: [number, number][];
+		provider?: string;
+		crs?: string;
 	};
 };
 
-export type DemoBounds = {
-	region: string;
+/** Active routing / map meta from GET /api/meta/routing */
+export type RoutingMeta = {
+	provider: string;
+	requested_provider?: string;
 	engine: string;
+	crs: string;
 	hard_avoid: boolean;
+	fallback_warning?: string | null;
+	amap_configured?: boolean;
+	amap_js_key?: string | null;
+	amap_security_js_code?: string | null;
+	geocoder?: string;
+	region: string;
 	bounds: {
 		lat_min: number;
 		lon_min: number;
@@ -69,8 +80,13 @@ export type DemoBounds = {
 		lon_max: number;
 	};
 	center: { lat: number; lon: number };
+	limitations?: string[];
 	note: string;
+	switch_path?: string;
 };
+
+/** @deprecated alias — same payload as RoutingMeta */
+export type DemoBounds = RoutingMeta;
 
 export type GeocodeHit = {
 	display_name: string;

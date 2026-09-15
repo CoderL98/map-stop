@@ -1,9 +1,14 @@
-//! Embedded demo road graph + A* with hard avoid of circular zones.
-//! Demo region: Hangzhou West Lake area (approx 30.20–30.32°N, 120.08–120.22°E).
+//! Pluggable routing providers: gaode (default with key), embedded, opensource stub.
 
-use crate::geo::{haversine_m, path_length_m, segment_intersects_circle, validate_polyline_vs_circles};
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+mod embedded;
+mod gaode;
+mod opensource;
+
+pub use embedded::RoadGraph;
+
+use std::sync::Arc;
+
+use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TravelMode {
@@ -22,12 +27,11 @@ impl TravelMode {
         }
     }
 
-    /// Nominal speed m/s for duration estimate.
     pub fn speed_mps(self) -> f64 {
         match self {
-            Self::Driving => 11.0,  // ~40 km/h urban
-            Self::Walking => 1.4,   // ~5 km/h
-            Self::Cycling => 4.2,   // ~15 km/h
+            Self::Driving => 11.0,
+            Self::Walking => 1.4,
+            Self::Cycling => 4.2,
         }
     }
 }
@@ -44,159 +48,134 @@ pub struct RouteResult {
     pub coordinates: Vec<(f64, f64)>, // lat, lon
     pub distance_m: f64,
     pub duration_s: f64,
+    pub provider: String,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Node {
-    lat: f64,
-    lon: f64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Gaode,
+    Embedded,
+    Opensource,
 }
 
-pub struct RoadGraph {
-    nodes: Vec<Node>,
-    /// adjacency: node_idx -> list of (neighbor_idx, length_m)
-    adj: Vec<Vec<(usize, f64)>>,
-    cols: usize,
-    rows: usize,
-    lat_min: f64,
-    lon_min: f64,
-    dlat: f64,
-    dlon: f64,
-}
-
-impl RoadGraph {
-    /// Build a rectangular street grid for the Hangzhou demo bbox.
-    pub fn hangzhou_demo() -> Self {
-        // West Lake / downtown Hangzhou demo
-        let lat_min = 30.20;
-        let lat_max = 30.32;
-        let lon_min = 120.08;
-        let lon_max = 120.22;
-        // ~90m steps
-        let dlat = 0.0008;
-        let dlon = 0.0009;
-        let rows = f64::floor((lat_max - lat_min) / dlat) as usize + 1;
-        let cols = f64::floor((lon_max - lon_min) / dlon) as usize + 1;
-        let n = rows * cols;
-        let mut nodes = Vec::with_capacity(n);
-        for r in 0..rows {
-            for c in 0..cols {
-                nodes.push(Node {
-                    lat: lat_min + r as f64 * dlat,
-                    lon: lon_min + c as f64 * dlon,
-                });
-            }
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gaode => "gaode",
+            Self::Embedded => "embedded",
+            Self::Opensource => "opensource",
         }
-        let mut adj = vec![Vec::new(); n];
-        let idx = |r: usize, c: usize| -> usize { r * cols + c };
-        for r in 0..rows {
-            for c in 0..cols {
-                let i = idx(r, c);
-                let a = nodes[i];
-                // 4-connected grid (roads)
-                let neighbors = [
-                    (r.wrapping_sub(1), c),
-                    (r + 1, c),
-                    (r, c.wrapping_sub(1)),
-                    (r, c + 1),
-                ];
-                for (nr, nc) in neighbors {
-                    if nr >= rows || nc >= cols {
-                        continue;
-                    }
-                    let j = idx(nr, nc);
-                    let b = nodes[j];
-                    let dist = haversine_m(a.lat, a.lon, b.lat, b.lon);
-                    adj[i].push((j, dist));
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gaode" | "amap" => Some(Self::Gaode),
+            "embedded" | "demo" => Some(Self::Embedded),
+            "opensource" | "osrm" | "graphhopper" | "valhalla" => Some(Self::Opensource),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RoutingService {
+    /// Effective provider used for /plan
+    pub active: ProviderKind,
+    /// What env requested (may differ if fallback)
+    pub requested: ProviderKind,
+    pub fallback_warning: Option<String>,
+    pub embedded: Arc<RoadGraph>,
+    pub amap_web_key: Option<String>,
+    /// JS API key exposed to frontend via /meta/routing (never commit real keys)
+    pub amap_js_key: Option<String>,
+    pub amap_security_js_code: Option<String>,
+    pub http: reqwest::Client,
+}
+
+impl RoutingService {
+    pub fn from_config(
+        cfg: &crate::config::Config,
+        http: reqwest::Client,
+        embedded: RoadGraph,
+    ) -> Self {
+        let has_web_key = cfg
+            .amap_web_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+
+        let requested = match cfg.routing_provider.as_deref() {
+            Some(s) => ProviderKind::parse(s).unwrap_or_else(|| {
+                tracing::warn!("unknown ROUTING_PROVIDER={s}, using auto");
+                if has_web_key {
+                    ProviderKind::Gaode
+                } else {
+                    ProviderKind::Embedded
                 }
-                // Occasional diagonals for more natural paths (every other cell)
-                if (r + c) % 3 == 0 {
-                    for (dr, dc) in [(1isize, 1), (1, -1)] {
-                        let nr = r as isize + dr;
-                        let nc = c as isize + dc;
-                        if nr < 0 || nc < 0 || nr as usize >= rows || nc as usize >= cols {
-                            continue;
-                        }
-                        let j = idx(nr as usize, nc as usize);
-                        let b = nodes[j];
-                        let dist = haversine_m(a.lat, a.lon, b.lat, b.lon);
-                        adj[i].push((j, dist));
-                        adj[j].push((i, dist));
-                    }
+            }),
+            None => {
+                if has_web_key {
+                    ProviderKind::Gaode
+                } else {
+                    ProviderKind::Embedded
                 }
             }
+        };
+
+        let (active, fallback_warning) = match requested {
+            ProviderKind::Gaode if !has_web_key => (
+                ProviderKind::Embedded,
+                Some(
+                    "ROUTING_PROVIDER=gaode 但未设置 AMAP_WEB_KEY，已回退 embedded"
+                        .to_string(),
+                ),
+            ),
+            other => (other, None),
+        };
+
+        if let Some(ref w) = fallback_warning {
+            tracing::warn!("{w}");
         }
-        // Punch a few "lakes / parks" holes so the graph isn't a perfect grid
-        // West Lake rough hole around 30.25, 120.14
-        let mut blocked = HashSet::new();
-        for (i, node) in nodes.iter().enumerate() {
-            let d = haversine_m(node.lat, node.lon, 30.25, 120.14);
-            if d < 1200.0 {
-                blocked.insert(i);
-            }
-        }
-        for i in 0..n {
-            adj[i].retain(|(j, _)| !blocked.contains(&i) && !blocked.contains(j));
-        }
+        tracing::info!(
+            "routing provider: active={} requested={}",
+            active.as_str(),
+            requested.as_str()
+        );
 
         Self {
-            nodes,
-            adj,
-            cols,
-            rows,
-            lat_min,
-            lon_min,
-            dlat,
-            dlon,
+            active,
+            requested,
+            fallback_warning,
+            embedded: Arc::new(embedded),
+            amap_web_key: cfg.amap_web_key.clone().filter(|s| !s.trim().is_empty()),
+            amap_js_key: cfg.amap_js_key.clone().filter(|s| !s.trim().is_empty()),
+            amap_security_js_code: cfg
+                .amap_security_js_code
+                .clone()
+                .filter(|s| !s.trim().is_empty()),
+            http,
         }
     }
 
-    pub fn bounds(&self) -> (f64, f64, f64, f64) {
-        (
-            self.lat_min,
-            self.lon_min,
-            self.lat_min + (self.rows - 1) as f64 * self.dlat,
-            self.lon_min + (self.cols - 1) as f64 * self.dlon,
-        )
+    pub fn crs(&self) -> &'static str {
+        match self.active {
+            ProviderKind::Gaode => "GCJ-02",
+            // Demo grid uses the same numeric Hangzhou bbox; treat as GCJ-02 when migrating to Gaode.
+            ProviderKind::Embedded => "GCJ-02-demo",
+            ProviderKind::Opensource => "WGS84",
+        }
     }
 
-    fn nearest_node(&self, lat: f64, lon: f64) -> Option<usize> {
-        let mut best = None;
-        let mut best_d = f64::MAX;
-        for (i, n) in self.nodes.iter().enumerate() {
-            if self.adj[i].is_empty() {
-                continue;
-            }
-            let d = haversine_m(lat, lon, n.lat, n.lon);
-            if d < best_d {
-                best_d = d;
-                best = Some(i);
-            }
+    pub fn engine_label(&self) -> &'static str {
+        match self.active {
+            ProviderKind::Gaode => "amap-webservice-v5",
+            ProviderKind::Embedded => "embedded-grid-astar",
+            ProviderKind::Opensource => "opensource-stub",
         }
-        // Reject if too far from graph (> 2km)
-        if best_d > 2000.0 {
-            return None;
-        }
-        best
     }
 
-    fn edge_blocked(&self, a: usize, b: usize, avoids: &[AvoidCircle]) -> bool {
-        let na = &self.nodes[a];
-        let nb = &self.nodes[b];
-        for c in avoids {
-            if haversine_m(na.lat, na.lon, c.lat, c.lon) < c.radius_m
-                || haversine_m(nb.lat, nb.lon, c.lat, c.lon) < c.radius_m
-                || segment_intersects_circle(
-                    na.lat, na.lon, nb.lat, nb.lon, c.lat, c.lon, c.radius_m,
-                )
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn route(
+    pub async fn route(
         &self,
         start_lat: f64,
         start_lon: f64,
@@ -205,167 +184,91 @@ impl RoadGraph {
         avoids: &[AvoidCircle],
         mode: TravelMode,
     ) -> Result<RouteResult, String> {
-        // Start/end must not be inside an avoid circle
-        for c in avoids {
-            if haversine_m(start_lat, start_lon, c.lat, c.lon) < c.radius_m {
-                return Err("起点位于躲避圆内，请调整起点或半径".into());
+        match self.active {
+            ProviderKind::Embedded => self.embedded.route(
+                start_lat, start_lon, end_lat, end_lon, avoids, mode,
+            ),
+            ProviderKind::Gaode => {
+                let key = self
+                    .amap_web_key
+                    .as_deref()
+                    .ok_or_else(|| "未配置 AMAP_WEB_KEY".to_string())?;
+                gaode::route(
+                    &self.http,
+                    key,
+                    start_lat,
+                    start_lon,
+                    end_lat,
+                    end_lon,
+                    avoids,
+                    mode,
+                )
+                .await
             }
-            if haversine_m(end_lat, end_lon, c.lat, c.lon) < c.radius_m {
-                return Err("终点位于躲避圆内，请调整终点或半径".into());
-            }
-        }
-
-        let start = self
-            .nearest_node(start_lat, start_lon)
-            .ok_or_else(|| "起点不在演示路网范围内（杭州西湖演示区）".to_string())?;
-        let goal = self
-            .nearest_node(end_lat, end_lon)
-            .ok_or_else(|| "终点不在演示路网范围内（杭州西湖演示区）".to_string())?;
-
-        if self.adj[start].is_empty() || self.adj[goal].is_empty() {
-            return Err("起终点附近无可用道路节点".into());
-        }
-
-        #[derive(Copy, Clone)]
-        struct State {
-            cost: f64,
-            node: usize,
-        }
-        impl PartialEq for State {
-            fn eq(&self, other: &Self) -> bool {
-                self.cost == other.cost && self.node == other.node
+            ProviderKind::Opensource => {
+                tracing::info!("opensource provider selected — stub not configured");
+                opensource::route(start_lat, start_lon, end_lat, end_lon, avoids, mode).await
             }
         }
-        impl Eq for State {}
-        impl PartialOrd for State {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for State {
-            fn cmp(&self, other: &Self) -> Ordering {
-                other
-                    .cost
-                    .partial_cmp(&self.cost)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| self.node.cmp(&other.node))
-            }
-        }
+    }
 
-        let heuristic = |n: usize| {
-            let a = &self.nodes[n];
-            let b = &self.nodes[goal];
-            haversine_m(a.lat, a.lon, b.lat, b.lon)
-        };
-
-        let mut open = BinaryHeap::new();
-        open.push(State {
-            cost: heuristic(start),
-            node: start,
-        });
-        let mut g_score: HashMap<usize, f64> = HashMap::new();
-        g_score.insert(start, 0.0);
-        let mut came_from: HashMap<usize, usize> = HashMap::new();
-
-        let mut found = false;
-        while let Some(State { cost: _, node }) = open.pop() {
-            if node == goal {
-                found = true;
-                break;
+    pub fn meta_json(&self) -> serde_json::Value {
+        let (lat_min, lon_min, lat_max, lon_max) = self.embedded.bounds();
+        let mut limitations = vec![
+            "单次生效躲避点 ≤ 50".to_string(),
+            "服务端对所有 provider 做折线硬避开二次校验".to_string(),
+        ];
+        match self.active {
+            ProviderKind::Gaode => {
+                limitations.push(
+                    "驾车：高德 avoidpolygons 原生避让 + Rust 校验".into(),
+                );
+                limitations.push(
+                    "步行/骑行：高德 API 无 avoidpolygons，仅 Rust 硬校验（穿行则失败）".into(),
+                );
+                limitations.push("坐标系 GCJ-02；请使用高德地图点选，勿混用未转换的 WGS84".into());
             }
-            let g = *g_score.get(&node).unwrap_or(&f64::MAX);
-            for &(nei, dist) in &self.adj[node] {
-                if self.edge_blocked(node, nei, avoids) {
-                    continue;
-                }
-                let tentative = g + dist;
-                if tentative < *g_score.get(&nei).unwrap_or(&f64::MAX) {
-                    came_from.insert(nei, node);
-                    g_score.insert(nei, tentative);
-                    open.push(State {
-                        cost: tentative + heuristic(nei),
-                        node: nei,
-                    });
-                }
+            ProviderKind::Embedded => {
+                limitations.push("演示区域：杭州西湖附近网格，非全国真实道路".into());
+            }
+            ProviderKind::Opensource => {
+                limitations.push("开源引擎未配置，规划将返回「未配置」错误".into());
             }
         }
 
-        if !found {
-            return Err(
-                "无法完全避开指定点位，请缩小半径或减少躲避点".into(),
-            );
-        }
-
-        // Reconstruct path (node indices)
-        let mut path_idx = vec![goal];
-        let mut cur = goal;
-        while cur != start {
-            cur = *came_from
-                .get(&cur)
-                .ok_or_else(|| "路径重构失败".to_string())?;
-            path_idx.push(cur);
-        }
-        path_idx.reverse();
-
-        let mut coords: Vec<(f64, f64)> = Vec::with_capacity(path_idx.len() + 2);
-        coords.push((start_lat, start_lon));
-        for &i in &path_idx {
-            let n = &self.nodes[i];
-            coords.push((n.lat, n.lon));
-        }
-        coords.push((end_lat, end_lon));
-
-        // Deduplicate consecutive near-identical points
-        coords.dedup_by(|a, b| haversine_m(a.0, a.1, b.0, b.1) < 1.0);
-
-        let circles: Vec<(f64, f64, f64)> = avoids
-            .iter()
-            .map(|c| (c.lat, c.lon, c.radius_m))
-            .collect();
-        validate_polyline_vs_circles(&coords, &circles)?;
-
-        let distance_m = path_length_m(&coords);
-        let duration_s = distance_m / mode.speed_mps();
-
-        Ok(RouteResult {
-            coordinates: coords,
-            distance_m,
-            duration_s,
+        serde_json::json!({
+            "provider": self.active.as_str(),
+            "requested_provider": self.requested.as_str(),
+            "engine": self.engine_label(),
+            "crs": self.crs(),
+            "hard_avoid": true,
+            "fallback_warning": self.fallback_warning,
+            "amap_configured": self.amap_web_key.is_some(),
+            "amap_js_key": self.amap_js_key,
+            "amap_security_js_code": self.amap_security_js_code,
+            "geocoder": match self.active {
+                ProviderKind::Gaode if self.amap_web_key.is_some() => "amap",
+                _ => "nominatim",
+            },
+            "region": match self.active {
+                ProviderKind::Gaode => "全国（高德覆盖范围）",
+                ProviderKind::Embedded => "杭州西湖演示路网",
+                ProviderKind::Opensource => "未配置",
+            },
+            "bounds": {
+                "lat_min": lat_min,
+                "lon_min": lon_min,
+                "lat_max": lat_max,
+                "lon_max": lon_max
+            },
+            "center": { "lat": 30.26, "lon": 120.15 },
+            "limitations": limitations,
+            "note": match self.active {
+                ProviderKind::Gaode => "v1 使用高德 Web 服务算路；坐标 GCJ-02。二期可切换 ROUTING_PROVIDER=opensource 自托管。",
+                ProviderKind::Embedded => "内嵌演示路网；设置 AMAP_WEB_KEY 并 ROUTING_PROVIDER=gaode 可切换高德。",
+                ProviderKind::Opensource => "开源路由接口已预留，请配置自托管引擎后实现 opensource provider。",
+            },
+            "switch_path": "同一 RoutingProvider 接口：ROUTING_PROVIDER=gaode|embedded|opensource"
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_without_avoid() {
-        let g = RoadGraph::hangzhou_demo();
-        let r = g
-            .route(30.22, 120.10, 30.30, 120.20, &[], TravelMode::Driving)
-            .unwrap();
-        assert!(r.distance_m > 1000.0);
-        assert!(r.coordinates.len() > 2);
-    }
-
-    #[test]
-    fn hard_avoid_detours_or_fails() {
-        let g = RoadGraph::hangzhou_demo();
-        // Place a large avoid roughly on the straight path
-        let avoids = vec![AvoidCircle {
-            lat: 30.26,
-            lon: 120.15,
-            radius_m: 800.0,
-        }];
-        let r = g.route(30.22, 120.10, 30.30, 120.20, &avoids, TravelMode::Driving);
-        // Either succeeds with detour that validates, or fails with Chinese message
-        match r {
-            Ok(route) => {
-                let circles = [(30.26, 120.15, 800.0)];
-                validate_polyline_vs_circles(&route.coordinates, &circles).unwrap();
-            }
-            Err(e) => assert!(e.contains("避开") || e.contains("躲避")),
-        }
     }
 }

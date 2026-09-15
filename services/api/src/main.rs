@@ -2,7 +2,7 @@ use map_stop_api::{
     auth::AppState,
     config::Config,
     db, routes,
-    routing::RoadGraph,
+    routing::{RoadGraph, RoutingService},
 };
 
 use std::sync::Arc;
@@ -32,20 +32,23 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!(e.message))?;
 
-    tracing::info!("building demo road graph (Hangzhou)...");
-    let graph = Arc::new(RoadGraph::hangzhou_demo());
+    tracing::info!("building demo road graph (Hangzhou embedded fallback)...");
+    let graph = RoadGraph::hangzhou_demo();
     let (a, b, c, d) = graph.bounds();
-    tracing::info!("demo bounds: ({a},{b}) – ({c},{d})");
+    tracing::info!("embedded demo bounds: ({a},{b}) – ({c},{d})");
 
     let http = reqwest::Client::builder()
         .user_agent("map-stop/0.1")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(20))
         .build()
         .expect("http client");
+
+    let routing = Arc::new(RoutingService::from_config(&cfg, http.clone(), graph));
+
     let state = AppState {
         pool,
         jwt_secret: cfg.jwt_secret.clone(),
-        graph,
+        routing,
         http,
         geocode_limiter: routes::geocode::GeocodeLimiter::default(),
     };

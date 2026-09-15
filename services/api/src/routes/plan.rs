@@ -34,7 +34,9 @@ pub struct PlanProps {
     pub duration_s: f64,
     pub mode: String,
     pub avoid_count: usize,
-    pub polyline: Vec<[f64; 2]>, // [lat, lon] for Leaflet convenience
+    pub polyline: Vec<[f64; 2]>, // [lat, lon] for map convenience
+    pub provider: String,
+    pub crs: String,
 }
 
 #[derive(Serialize)]
@@ -53,14 +55,12 @@ pub async fn plan_route(
     let mode = TravelMode::from_str(&body.mode)
         .ok_or_else(|| AppError::bad_request("出行方式须为 driving|walking|cycling"))?;
 
-    // Enabled system points
     let sys: Vec<(f64, f64, f64)> = sqlx::query_as(
         "SELECT lat, lon, radius_m FROM system_points WHERE enabled = 1",
     )
     .fetch_all(&state.pool)
     .await?;
 
-    // Selected custom points
     let custom: Vec<(f64, f64, f64)> = if let Some(ids) = &body.custom_point_ids {
         if ids.is_empty() {
             vec![]
@@ -106,7 +106,7 @@ pub async fn plan_route(
     }
 
     let result = state
-        .graph
+        .routing
         .route(
             body.start.lat,
             body.start.lon,
@@ -115,6 +115,7 @@ pub async fn plan_route(
             &avoids,
             mode,
         )
+        .await
         .map_err(AppError::bad_request)?;
 
     let geo_coords: Vec<[f64; 2]> = result
@@ -140,25 +141,18 @@ pub async fn plan_route(
             mode: body.mode,
             avoid_count: avoids.len(),
             polyline,
+            provider: result.provider,
+            crs: state.routing.crs().into(),
         },
     }))
 }
 
-pub async fn demo_bounds(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
-    let (lat_min, lon_min, lat_max, lon_max) = state.graph.bounds();
-    Json(serde_json::json!({
-        "region": "杭州西湖演示路网",
-        "engine": "embedded-grid-astar",
-        "hard_avoid": true,
-        "bounds": {
-            "lat_min": lat_min,
-            "lon_min": lon_min,
-            "lat_max": lat_max,
-            "lon_max": lon_max
-        },
-        "center": { "lat": 30.26, "lon": 120.15 },
-        "note": "起终点请落在演示区域内；路网为网格近似，用于本地硬避开演示，非全国真实道路。"
-    }))
+/// Primary meta endpoint for active routing provider / CRS / limits.
+pub async fn routing_meta(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.routing.meta_json())
+}
+
+/// Backward-compatible alias (older FE used /meta/demo-bounds).
+pub async fn demo_bounds(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.routing.meta_json())
 }

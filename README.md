@@ -8,134 +8,113 @@
 
 | 层 | 选型 |
 |----|------|
-| 前端 | SvelteKit + pnpm + TypeScript + Leaflet |
+| 前端 | SvelteKit + pnpm + TypeScript；规划页优先 **高德 JS API 2.0**（有 Key 时），否则 Leaflet + OSM |
 | 后端 | Rust (axum) + SQLite + JWT + argon2 |
-| 底图 | OpenStreetMap 瓦片（保留 © OpenStreetMap 署名） |
-| 地名搜索 | Nominatim（经 Rust `GET /api/geocode` 代理，服务端 User-Agent + 限流） |
-| 算路 | **内嵌演示路网 + A\***（杭州西湖区域网格），服务端对折线二次几何校验 |
+| 算路 | 可插拔 `RoutingProvider`：`gaode`（默认有 Key）/ `embedded`（杭州网格 A*）/ `opensource`（二期 stub） |
+| 地名搜索 | 高德输入提示/地理编码（gaode）或 Nominatim 代理（embedded） |
 
-未使用高德 / 百度 / 腾讯 SDK。本环境未依赖 Docker；`docker-compose` 未纳入首版（可选后续加 GraphHopper/Valhalla）。
+## 算路 Provider（重要）
 
-## 算路说明与限制（重要）
+环境变量 `ROUTING_PROVIDER=gaode|embedded|opensource`：
 
-- **引擎**：`embedded-grid-astar`（Rust 内嵌），不是全国真实 OSM 路网。
-- **演示区域**：杭州西湖附近约 `30.20–30.32°N, 120.08–120.22°E`。起终点请落在该范围（规划页会画出蓝色虚线框）。
-- **网格密度**：约 80–100m 步进的矩形街道网格，用于本地硬避开演示；非真实道路几何。若需更密网格可后续调小 `dlat`/`dlon`。
-- **硬避开**：规划时生效禁区 = 全部已启用系统点 ∪ 用户勾选的自定义点；边与圆相交则不可通行；无解返回「无法完全避开指定点位…」；结果折线再校验，禁止静默穿行。
-- **出行方式**：driving / walking / cycling（影响时长估算速度，路网相同）。
-- **上限**：单次生效躲避点 ≤ 50。
-- 生产若需真实路网，可替换为自托管 GraphHopper / Valhalla（带 avoid 多边形）并由同一套校验逻辑兜底。
+| 值 | 行为 |
+|----|------|
+| `gaode` | 高德 Web 服务路径规划 v5（驾车/步行/骑行）。需 `AMAP_WEB_KEY`；无 Key 时**回退 embedded** 并在 `/api/meta/routing` 警告 |
+| `embedded` | 内嵌杭州西湖演示网格 A*，始终可用，无需 Key |
+| `opensource` | 预留 GraphHopper/Valhalla；当前返回明确「未配置」错误 |
 
-## 首次启动种子数据
+未设置 `ROUTING_PROVIDER` 时：有 `AMAP_WEB_KEY` → `gaode`，否则 `embedded`。
 
-- **管理员**：环境变量 `ADMIN_USERNAME` / `ADMIN_PASSWORD`（默认 `admin` / `admin123`）。
-- **系统躲避点**：若 `system_points` 表为空，自动插入 3 个杭州演示框内启用点（半径约 90–120m）：
-  - 断桥附近施工
-  - 苏堤南口临时管制
-  - 岳庙东侧围挡  
-  可在管理端删除或停用。
+**硬避开（所有 provider）**：服务端对结果折线做圆形禁区二次校验；相交则中文失败，禁止静默穿行。
+
+**高德避让**：
+
+- 驾车：原生 `avoidpolygons`（圆近似多边形）+ Rust 校验
+- 步行/骑行：官方 API **无** avoidpolygons → 仍请求算路，但 Rust 校验失败则报错（含说明）
+
+**坐标系**：高德路径下点位按 **GCJ-02** 存储与展示；勿混用未转换的 WGS84/OSM 点击坐标。详见 `/api/meta/routing` 的 `crs` 字段。
+
+### 申请高德 Key
+
+1. 注册 [高德开放平台](https://console.amap.com/dev/key/app)
+2. 创建应用，添加两类 Key：
+   - **Web服务** → `AMAP_WEB_KEY`（路径规划、地理编码、输入提示）
+   - **Web端(JS API)** → `AMAP_JS_KEY`（前端底图）；推荐配置安全密钥 `AMAP_SECURITY_JS_CODE`
+3. 个人开发者有免费配额；**商用请遵守高德服务条款并购买相应授权**，勿将 Key 提交进仓库
+
+切换到二期自托管开源路由：实现同一 `RoutingProvider` 接口后设 `ROUTING_PROVIDER=opensource`（当前为 stub）。
 
 ## 快速启动
 
 ### 前置
 
 - Rust（cargo）、Node 20+、pnpm
-- Windows 可用 PowerShell 脚本；Linux/macOS/WSL 用 bash 脚本
 
 ### 1. 配置
 
 ```bash
 cp .env.example .env
-# 按需修改 ADMIN_USERNAME / ADMIN_PASSWORD / JWT_SECRET / DATABASE_URL
-```
-
-Windows PowerShell：
-
-```powershell
-Copy-Item .env.example .env
-# 编辑 .env；DATABASE_URL 建议指向本机绝对路径，例如 sqlite:///C:/path/to/map-stop/data/map-stop.db
-# 若仍为 /workspace/... ，scripts/dev-api.ps1 会自动改写为仓库下 data\map-stop.db
+# 至少设置 JWT_SECRET / ADMIN_* / DATABASE_URL
+# 使用高德：填写 AMAP_WEB_KEY（及 AMAP_JS_KEY），ROUTING_PROVIDER=gaode
 ```
 
 ### 2. 启动 API
 
-Linux / macOS / WSL：
-
 ```bash
 mkdir -p data
 ./scripts/dev-api.sh
-# 或：cd services/api && cargo run
 # 默认 http://0.0.0.0:8080 ，路由前缀 /api
 ```
 
-Windows：
-
-```powershell
-.\scripts\dev-api.ps1
-# 或双击 / 运行 scripts\dev-api.bat
-```
-
-首次启动会创建 SQLite、种子管理员，并在无系统点时写入演示躲避点。
-
 ### 3. 启动前端
 
-Linux / macOS / WSL：
-
 ```bash
-cd apps/web
-pnpm install
-pnpm dev
-# http://localhost:5173 （已代理 /api → :8080）
-```
-
-Windows：
-
-```powershell
-.\scripts\dev-web.ps1
-# 或 scripts\dev-web.bat
+cd apps/web && pnpm install && pnpm dev
+# http://localhost:5173 （代理 /api → :8080）
 ```
 
 ### 冒烟测试
 
 ```bash
-# API 已启动时
 ./scripts/smoke-test.sh
 ```
 
-Windows：
+无 Key 时冒烟走 `embedded`；有 Key 时可设 `ROUTING_PROVIDER=gaode` 验证高德算路。
 
-```powershell
-.\scripts\smoke-test.ps1
-```
+## 环境变量
 
-冒烟覆盖：health、登录、**geocode**、创建系统点、规划。
-
-## CSV 模板
-
-UTF-8：`名称,纬度,经度,半径米,备注`  
-示例：[`docs/templates/avoid-points.csv`](docs/templates/avoid-points.csv)
+| 变量 | 说明 |
+|------|------|
+| `DATABASE_URL` | SQLite URL |
+| `JWT_SECRET` | JWT 密钥 |
+| `LISTEN_ADDR` | 默认 `0.0.0.0:8080` |
+| `CORS_ORIGIN` | 默认 `http://localhost:5173` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 种子管理员 |
+| `ROUTING_PROVIDER` | `gaode` \| `embedded` \| `opensource` |
+| `AMAP_WEB_KEY` | 高德 Web 服务 Key |
+| `AMAP_JS_KEY` | 高德 JS API Key（前端） |
+| `AMAP_SECURITY_JS_CODE` | JS 安全密钥（可选） |
 
 ## 主要 API
 
-- `POST /api/auth/register` `POST /api/auth/login` `GET /api/auth/me`
-- `GET|POST /api/system-points`（写操作需 admin）`POST /api/system-points/import`
-- `GET|POST /api/custom-points` …
-- `GET|POST /api/uploads` `POST /api/uploads/import`
-- `GET /api/admin/uploads` `POST .../approve` `POST .../reject`
-- `POST /api/plan` `GET /api/meta/demo-bounds`
-- `GET /api/geocode?q=` — Nominatim 代理（偏置演示 viewbox，`accept-language=zh`，约 1 req/s）
+- 认证 / 系统点 / 自定义点 / 上传审核：同前
+- `POST /api/plan` — 规划（properties 含 `provider`、`crs`）
+- `GET /api/meta/routing` — 当前引擎、CRS、限制、JS Key（供前端）
+- `GET /api/meta/demo-bounds` — 同上（兼容旧前端）
+- `GET /api/geocode?q=` — 高德或 Nominatim
 
-## 地图署名
+## 地图与版权
 
-地图数据 © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors（ODbL）。  
-地名搜索使用 [Nominatim](https://nominatim.org/)（遵守使用政策：合理 User-Agent、限流）。
+- **高德**：须遵守 [高德开放平台条款](https://lbs.amap.com/)；Key 与配额由调用方自行申请与付费；商用需相应授权。
+- **OSM / Leaflet 回退**：© [OpenStreetMap](https://www.openstreetmap.org/copyright)（ODbL）；Nominatim 遵守使用政策。
+- **开源算路（二期）**：GraphHopper / Valhalla + OSM，接口已预留。
 
 ## 目录
 
 ```
 apps/web          # SvelteKit
-services/api      # Rust API
+services/api      # Rust API（routing/{mod,embedded,gaode,opensource}.rs）
 docs/             # REQUIREMENTS.md + CSV 模板
-scripts/          # 本地启动与冒烟（.sh / .ps1 / .bat）
+scripts/          # 本地启动与冒烟
 data/             # SQLite（本地，gitignore）
 ```

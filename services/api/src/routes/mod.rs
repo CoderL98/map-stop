@@ -43,6 +43,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/admin/uploads/{id}/approve", post(uploads::approve))
         .route("/admin/uploads/{id}/reject", post(uploads::reject))
         .route("/plan", post(plan::plan_route))
+        .route("/meta/routing", get(plan::routing_meta))
         .route("/meta/demo-bounds", get(plan::demo_bounds))
         .route("/geocode", get(geocode::geocode))
         .with_state(state)
