@@ -50,7 +50,17 @@ export async function api<T>(
 	const res = await fetch(`/api${path}`, { ...rest, headers, body });
 	const data = await res.json().catch(() => ({}));
 	if (!res.ok) {
-		throw new Error((data as { error?: string }).error || `请求失败 (${res.status})`);
+		const message =
+			(data as { error?: string }).error || `请求失败 (${res.status})`;
+		if (res.status === 401 && typeof window !== 'undefined') {
+			clearSession();
+			// Avoid redirect loop on auth endpoints
+			if (!path.startsWith('/auth/')) {
+				const next = encodeURIComponent(window.location.pathname + window.location.search);
+				window.location.href = `/login?next=${next}`;
+			}
+		}
+		throw new Error(message);
 	}
 	return data as T;
 }

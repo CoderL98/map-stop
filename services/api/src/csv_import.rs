@@ -4,6 +4,18 @@ use serde::Serialize;
 
 use crate::error::AppError;
 
+/// Soft limit for CSV upload bodies (2 MiB).
+pub const MAX_CSV_BYTES: usize = 2 * 1024 * 1024;
+
+pub fn ensure_csv_size(bytes: &[u8]) -> Result<(), AppError> {
+    if bytes.len() > MAX_CSV_BYTES {
+        return Err(AppError::bad_request(
+            format!("CSV 文件过大（最大 {} KB）", MAX_CSV_BYTES / 1024),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedRow {
     pub line: usize,

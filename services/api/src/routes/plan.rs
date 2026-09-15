@@ -47,6 +47,17 @@ pub struct PlanRespOuter {
     properties: PlanProps,
 }
 
+
+fn validate_endpoint(label: &str, lat: f64, lon: f64) -> Result<(), AppError> {
+    if !lat.is_finite() || !lon.is_finite() {
+        return Err(AppError::bad_request(format!("{label}坐标无效")));
+    }
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return Err(AppError::bad_request(format!("{label}经纬度超出范围")));
+    }
+    Ok(())
+}
+
 pub async fn plan_route(
     State(state): State<AppState>,
     user: AuthUser,
@@ -54,6 +65,18 @@ pub async fn plan_route(
 ) -> Result<Json<PlanRespOuter>, AppError> {
     let mode = TravelMode::from_str(&body.mode)
         .ok_or_else(|| AppError::bad_request("出行方式须为 driving|walking|cycling"))?;
+
+    validate_endpoint("起点", body.start.lat, body.start.lon)?;
+    validate_endpoint("终点", body.end.lat, body.end.lon)?;
+    if crate::geo::haversine_m(
+        body.start.lat,
+        body.start.lon,
+        body.end.lat,
+        body.end.lon,
+    ) < 1.0
+    {
+        return Err(AppError::bad_request("起点与终点不能重合"));
+    }
 
     let sys: Vec<(f64, f64, f64)> = sqlx::query_as(
         "SELECT lat, lon, radius_m FROM system_points WHERE enabled = 1",

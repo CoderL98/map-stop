@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken } from '$lib/api';
-	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import { mountMapHost, type MapHost, type MapKind } from '$lib/map-host';
 	import type { ImportResult, UploadItem } from '$lib/types';
 	import type { Marker, Rectangle } from 'leaflet';
 
@@ -19,6 +19,7 @@
 
 	let mapEl: HTMLDivElement;
 	let host: MapHost | null = null;
+	let mapCancel: (() => void) | null = null;
 	let mapKind = $state<MapKind>('leaflet');
 	let crsLabel = $state('CRS 未知');
 	let boundsNote = $state('');
@@ -42,11 +43,16 @@
 	});
 
 	onDestroy(() => {
-		host?.destroy();
+		mapCancel?.();
+		mapCancel = null;
+		host = null;
 	});
 
 	async function initMap() {
-		host = await createMapHost(mapEl);
+		const mounted = mountMapHost(mapEl);
+		mapCancel = mounted.cancel;
+		host = await mounted.ready;
+		if (!host) return;
 		mapKind = host.kind;
 		crsLabel = host.crsLabel;
 

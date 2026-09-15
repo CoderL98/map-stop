@@ -138,3 +138,36 @@ export async function createMapHost(
 		}
 	};
 }
+
+/**
+ * Async map mount with destroy-race guard: if `signal` aborts (or returned
+ * cancel() is called) before create finishes, the map is destroyed immediately.
+ */
+export function mountMapHost(
+	el: HTMLDivElement,
+	opts: CreateMapHostOpts = {}
+): { ready: Promise<MapHost | null>; cancel: () => void } {
+	let cancelled = false;
+	let host: MapHost | null = null;
+	const ready = createMapHost(el, opts)
+		.then((h) => {
+			if (cancelled) {
+				h.destroy();
+				return null;
+			}
+			host = h;
+			return h;
+		})
+		.catch((e) => {
+			if (!cancelled) throw e;
+			return null;
+		});
+	return {
+		ready,
+		cancel: () => {
+			cancelled = true;
+			host?.destroy();
+			host = null;
+		}
+	};
+}

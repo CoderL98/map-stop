@@ -48,6 +48,8 @@
 	let searchingEnd = $state(false);
 	let searchHint = $state('');
 
+	let mapAlive = true;
+
 	onMount(async () => {
 		if (!getToken()) {
 			window.location.href = '/login';
@@ -55,6 +57,7 @@
 		}
 
 		routingMeta = await fetchRoutingMeta();
+		if (!mapAlive) return;
 
 		if (shouldUseAmap(routingMeta) && routingMeta?.amap_js_key) {
 			mapKind = 'amap';
@@ -63,9 +66,11 @@
 					jsKey: routingMeta.amap_js_key,
 					securityJsCode: routingMeta.amap_security_js_code
 				});
+				if (!mapAlive) return;
 				await initAmap();
 			} catch (e) {
 				console.warn('AMap load failed, falling back to Leaflet', e);
+				if (!mapAlive) return;
 				mapKind = 'leaflet';
 				await initLeaflet();
 			}
@@ -73,6 +78,7 @@
 			mapKind = 'leaflet';
 			await initLeaflet();
 		}
+		if (!mapAlive) return;
 
 		if (routingMeta) {
 			const warn = routingMeta.fallback_warning ? ` ⚠ ${routingMeta.fallback_warning}` : '';
@@ -80,12 +86,24 @@
 		}
 
 		await refreshPoints();
+		if (!mapAlive) return;
 		redrawAvoids();
 	});
 
 	onDestroy(() => {
-		map?.remove();
-		amap?.destroy?.();
+		mapAlive = false;
+		try {
+			map?.remove();
+		} catch {
+			/* ignore */
+		}
+		map = null;
+		try {
+			amap?.destroy?.();
+		} catch {
+			/* ignore */
+		}
+		amap = null;
 	});
 
 	async function initLeaflet() {
@@ -467,19 +485,50 @@
 	}
 
 	async function toggleCustom(p: CustomPoint) {
-		const updated = await api<CustomPoint>(`/custom-points/${p.id}`, {
-			method: 'PUT',
-			json: {
-				name: p.name,
-				lat: p.lat,
-				lon: p.lon,
-				radius_m: p.radius_m,
-				note: p.note,
-				selected: !p.selected
-			}
-		});
-		customPoints = customPoints.map((c) => (c.id === p.id ? updated : c));
-		redrawAvoids();
+		try {
+			const updated = await api<CustomPoint>(`/custom-points/${p.id}`, {
+				method: 'PUT',
+				json: {
+					name: p.name,
+					lat: p.lat,
+					lon: p.lon,
+					radius_m: p.radius_m,
+					note: p.note,
+					selected: !p.selected
+				}
+			});
+			customPoints = customPoints.map((c) => (c.id === p.id ? updated : c));
+			redrawAvoids();
+		} catch (err) {
+			error = err instanceof Error ? err.message : '更新失败';
+		}
+	}
+
+	async function updateCustomRadius(p: CustomPoint, raw: string | number) {
+		const next = typeof raw === 'number' ? raw : Number(raw);
+		if (!Number.isFinite(next) || next <= 0 || next > 50000) {
+			error = '半径必须大于 0 且不超过 50000 米';
+			return;
+		}
+		if (next === p.radius_m) return;
+		error = '';
+		try {
+			const updated = await api<CustomPoint>(`/custom-points/${p.id}`, {
+				method: 'PUT',
+				json: {
+					name: p.name,
+					lat: p.lat,
+					lon: p.lon,
+					radius_m: next,
+					note: p.note,
+					selected: p.selected
+				}
+			});
+			customPoints = customPoints.map((c) => (c.id === p.id ? updated : c));
+			redrawAvoids();
+		} catch (err) {
+			error = err instanceof Error ? err.message : '更新失败';
+		}
 	}
 </script>
 
@@ -618,8 +667,18 @@
 						<tr>
 							<td><input type="checkbox" checked={p.selected} onchange={() => toggleCustom(p)} /></td>
 							<td>{p.name}</td>
-							<td>{p.radius_m}</td>
-							<td><a href="/custom" style="font-size:0.85rem;">调整半径</a></td>
+							<td style="width:110px;">
+								<input
+									type="number"
+									min="1"
+									max="50000"
+									value={p.radius_m}
+									style="width:90px;"
+									onchange={(e) =>
+										updateCustomRadius(p, (e.currentTarget as HTMLInputElement).value)}
+								/>
+							</td>
+							<td><a href="/custom" style="font-size:0.85rem;">管理</a></td>
 						</tr>
 					{/each}
 				</tbody>

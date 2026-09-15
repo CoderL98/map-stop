@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import { mountMapHost, type MapHost, type MapKind } from '$lib/map-host';
 	import type { UploadItem } from '$lib/types';
 	import type { Circle, Marker } from 'leaflet';
 
@@ -17,6 +17,7 @@
 
 	let mapEl: HTMLDivElement;
 	let host: MapHost | null = null;
+	let mapCancel: (() => void) | null = null;
 	let mapKind = $state<MapKind>('leaflet');
 	let crsLabel = $state('CRS 未知');
 
@@ -37,11 +38,16 @@
 	});
 
 	onDestroy(() => {
-		host?.destroy();
+		mapCancel?.();
+		mapCancel = null;
+		host = null;
 	});
 
 	async function initMap() {
-		host = await createMapHost(mapEl);
+		const mounted = mountMapHost(mapEl);
+		mapCancel = mounted.cancel;
+		host = await mounted.ready;
+		if (!host) return;
 		mapKind = host.kind;
 		crsLabel = host.crsLabel;
 	}
@@ -102,11 +108,15 @@
 	}
 
 	async function load() {
-		const q = tab === 'all' ? 'all' : tab;
-		items = await api<UploadItem[]>(`/admin/uploads?status=${q}`);
-		selected = {};
-		if (items.length && tab === 'pending') {
-			showOnMap(items[0]);
+		try {
+			const q = tab === 'all' ? 'all' : tab;
+			items = await api<UploadItem[]>(`/admin/uploads?status=${q}`);
+			selected = {};
+			if (items.length && tab === 'pending') {
+				showOnMap(items[0]);
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : '加载失败';
 		}
 	}
 

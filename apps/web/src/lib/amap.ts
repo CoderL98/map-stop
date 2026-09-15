@@ -35,6 +35,10 @@ export function loadAmap(keys: AmapKeys): Promise<any> {
 		};
 		script.onerror = () => reject(new Error('无法加载高德 JS API'));
 		document.head.appendChild(script);
+	}).catch((err) => {
+		// Allow a later retry after a failed load (bad key / network).
+		loading = null;
+		throw err;
 	});
 	return loading;
 }

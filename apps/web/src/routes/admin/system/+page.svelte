@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import { mountMapHost, type MapHost, type MapKind } from '$lib/map-host';
 	import type { ImportResult, SystemPoint } from '$lib/types';
 	import type { LayerGroup, Circle, Marker } from 'leaflet';
 
@@ -29,6 +29,7 @@
 
 	let mapEl: HTMLDivElement;
 	let host: MapHost | null = null;
+	let mapCancel: (() => void) | null = null;
 	let mapKind = $state<MapKind>('leaflet');
 	let crsLabel = $state('CRS 未知');
 
@@ -68,11 +69,16 @@
 	});
 
 	onDestroy(() => {
-		host?.destroy();
+		mapCancel?.();
+		mapCancel = null;
+		host = null;
 	});
 
 	async function initMap() {
-		host = await createMapHost(mapEl);
+		const mounted = mountMapHost(mapEl);
+		mapCancel = mounted.cancel;
+		host = await mounted.ready;
+		if (!host) return;
 		mapKind = host.kind;
 		crsLabel = host.crsLabel;
 
@@ -188,8 +194,12 @@
 	}
 
 	async function load() {
-		points = await api<SystemPoint[]>('/system-points');
-		redrawAvoids();
+		try {
+			points = await api<SystemPoint[]>('/system-points');
+			redrawAvoids();
+		} catch (err) {
+			error = err instanceof Error ? err.message : '加载失败';
+		}
 	}
 
 	async function add(e: Event) {
@@ -248,17 +258,27 @@
 	}
 
 	async function toggle(p: SystemPoint) {
-		await api(`/system-points/${p.id}/enabled`, {
-			method: 'PATCH',
-			json: { enabled: !p.enabled }
-		});
-		await load();
+		error = '';
+		try {
+			await api(`/system-points/${p.id}/enabled`, {
+				method: 'PATCH',
+				json: { enabled: !p.enabled }
+			});
+			await load();
+		} catch (err) {
+			error = err instanceof Error ? err.message : '更新失败';
+		}
 	}
 
 	async function remove(id: string) {
 		if (!confirm('确认删除该系统点？')) return;
-		await api(`/system-points/${id}`, { method: 'DELETE' });
-		await load();
+		error = '';
+		try {
+			await api(`/system-points/${id}`, { method: 'DELETE' });
+			await load();
+		} catch (err) {
+			error = err instanceof Error ? err.message : '删除失败';
+		}
 	}
 
 	async function importCsv() {

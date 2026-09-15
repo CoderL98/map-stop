@@ -97,6 +97,9 @@ cd apps/web && pnpm install && pnpm dev
 
 ## 主要 API
 
+前端在收到 API `401` 时会清空本地会话并跳转登录页（JWT 过期/失效）。自定义点可在「自定义点」或「路线规划」页直接改半径。
+
+
 - 认证 / 系统点 / 自定义点 / 上传审核：同前
 - `POST /api/plan` — 规划（properties 含 `provider`、`crs`）
 - `GET /api/meta/routing` — 当前引擎、CRS、限制、JS Key（供前端）

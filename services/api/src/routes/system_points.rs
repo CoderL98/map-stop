@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AdminUser, AppState, AuthUser};
-use crate::csv_import::parse_avoid_points_csv;
+use crate::csv_import::{ensure_csv_size, parse_avoid_points_csv};
 use crate::error::AppError;
 
 #[derive(Serialize)]
@@ -204,6 +204,7 @@ pub async fn import_csv(
         }
     }
     let bytes = bytes.ok_or_else(|| AppError::bad_request("请上传 CSV 文件"))?;
+    ensure_csv_size(&bytes)?;
     let parsed = parse_avoid_points_csv(&bytes)?;
 
     let mut imported = 0u32;

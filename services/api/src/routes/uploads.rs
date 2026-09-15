@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AdminUser, AppState, AuthUser};
-use crate::csv_import::parse_avoid_points_csv;
+use crate::csv_import::{ensure_csv_size, parse_avoid_points_csv};
 use crate::error::AppError;
 
 #[derive(Serialize)]
@@ -185,15 +185,19 @@ pub async fn import_csv(
         .await
         .map_err(|e| AppError::bad_request(format!("上传失败: {e}")))?
     {
-        bytes = Some(
-            field
-                .bytes()
-                .await
-                .map_err(|e| AppError::bad_request(format!("读取文件失败: {e}")))?
-                .to_vec(),
-        );
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" || name == "csv" || bytes.is_none() {
+            bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::bad_request(format!("读取文件失败: {e}")))?
+                    .to_vec(),
+            );
+        }
     }
     let bytes = bytes.ok_or_else(|| AppError::bad_request("请上传 CSV 文件"))?;
+    ensure_csv_size(&bytes)?;
     let parsed = parse_avoid_points_csv(&bytes)?;
 
     let mut imported = 0u32;
@@ -319,17 +323,27 @@ pub async fn approve(
     admin: AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let row: Option<(String, f64, f64, f64, Option<String>)> = sqlx::query_as(
-        "SELECT name, lat, lon, radius_m, note FROM uploads WHERE id=? AND status='pending'",
+    // Claim pending row first inside a transaction so concurrent approves cannot
+    // each insert a duplicate system point (SELECT-outside-TX race).
+    let mut tx = state.pool.begin().await?;
+    let claimed = sqlx::query(
+        "UPDATE uploads SET status='approved', reviewed_by=?, reviewed_at=datetime('now') WHERE id=? AND status='pending'",
+    )
+    .bind(&admin.0.id)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        return Err(AppError::not_found("待审上传不存在或已审核"));
+    }
+    let row: (String, f64, f64, f64, Option<String>) = sqlx::query_as(
+        "SELECT name, lat, lon, radius_m, note FROM uploads WHERE id=?",
     )
     .bind(&id)
-    .fetch_optional(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
-    let Some((name, lat, lon, radius_m, note)) = row else {
-        return Err(AppError::not_found("待审上传不存在"));
-    };
+    let (name, lat, lon, radius_m, note) = row;
     let sys_id = Uuid::new_v4().to_string();
-    let mut tx = state.pool.begin().await?;
     sqlx::query(
         "INSERT INTO system_points (id, name, lat, lon, radius_m, note, enabled, created_by) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
     )
@@ -340,13 +354,6 @@ pub async fn approve(
     .bind(radius_m)
     .bind(&note)
     .bind(&admin.0.id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE uploads SET status='approved', reviewed_by=?, reviewed_at=datetime('now') WHERE id=?",
-    )
-    .bind(&admin.0.id)
-    .bind(&id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
