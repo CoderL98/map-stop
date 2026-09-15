@@ -32,7 +32,18 @@ export type UploadItem = {
 	status: string;
 	reject_reason?: string | null;
 	created_at: string;
+	reviewed_at?: string | null;
 	username?: string | null;
+};
+
+export type ImportRowError = {
+	line: number;
+	message: string;
+};
+
+export type ImportResult = {
+	imported: number;
+	errors: ImportRowError[];
 };
 
 export type PlanResult = {

@@ -21,7 +21,9 @@ pub fn api_router(state: AppState) -> Router {
         .route("/system-points/import", post(system_points::import_csv))
         .route(
             "/system-points/{id}",
-            put(system_points::update).delete(system_points::delete),
+            put(system_points::update)
+                .patch(system_points::update)
+                .delete(system_points::delete),
         )
         .route(
             "/system-points/{id}/enabled",
@@ -37,7 +39,7 @@ pub fn api_router(state: AppState) -> Router {
         )
         .route("/uploads", get(uploads::list_mine).post(uploads::create))
         .route("/uploads/import", post(uploads::import_csv))
-        .route("/admin/uploads", get(uploads::list_pending))
+        .route("/admin/uploads", get(uploads::list_admin))
         .route("/admin/uploads/{id}/approve", post(uploads::approve))
         .route("/admin/uploads/{id}/reject", post(uploads::reject))
         .route("/plan", post(plan::plan_route))

@@ -1,10 +1,9 @@
-mod auth;
-mod config;
-mod db;
-mod error;
-mod geo;
-mod routes;
-mod routing;
+use map_stop_api::{
+    auth::AppState,
+    config::Config,
+    db, routes,
+    routing::RoadGraph,
+};
 
 use std::sync::Arc;
 
@@ -12,10 +11,6 @@ use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::auth::AppState;
-use crate::config::Config;
-use crate::routing::RoadGraph;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret: cfg.jwt_secret.clone(),
         graph,
         http,
-        geocode_limiter: crate::routes::geocode::GeocodeLimiter::default(),
+        geocode_limiter: routes::geocode::GeocodeLimiter::default(),
     };
 
     let cors = if cfg.cors_origin == "*" {

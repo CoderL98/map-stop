@@ -1,11 +1,12 @@
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AdminUser, AppState, AuthUser};
+use crate::csv_import::parse_avoid_points_csv;
 use crate::error::AppError;
 
 #[derive(Serialize)]
@@ -19,6 +20,7 @@ pub struct UploadDto {
     pub status: String,
     pub reject_reason: Option<String>,
     pub created_at: String,
+    pub reviewed_at: Option<String>,
     pub username: Option<String>,
 }
 
@@ -36,6 +38,12 @@ pub struct RejectBody {
     pub reason: String,
 }
 
+#[derive(Deserialize)]
+pub struct AdminListQuery {
+    /// pending | approved | rejected | all (default pending for backward compat)
+    pub status: Option<String>,
+}
+
 fn validate(lat: f64, lon: f64, radius_m: f64) -> Result<(), AppError> {
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
         return Err(AppError::bad_request("经纬度超出范围"));
@@ -44,6 +52,33 @@ fn validate(lat: f64, lon: f64, radius_m: f64) -> Result<(), AppError> {
         return Err(AppError::bad_request("半径必须大于 0 且不超过 50000 米"));
     }
     Ok(())
+}
+
+fn map_mine_row(
+    id: String,
+    name: String,
+    lat: f64,
+    lon: f64,
+    radius_m: f64,
+    note: Option<String>,
+    status: String,
+    reject_reason: Option<String>,
+    created_at: String,
+    reviewed_at: Option<String>,
+) -> UploadDto {
+    UploadDto {
+        id,
+        name,
+        lat,
+        lon,
+        radius_m,
+        note,
+        status,
+        reject_reason,
+        created_at,
+        reviewed_at,
+        username: None,
+    }
 }
 
 pub async fn list_mine(
@@ -60,8 +95,9 @@ pub async fn list_mine(
         String,
         Option<String>,
         String,
+        Option<String>,
     )> = sqlx::query_as(
-        "SELECT id, name, lat, lon, radius_m, note, status, reject_reason, created_at FROM uploads WHERE user_id=? ORDER BY created_at DESC",
+        "SELECT id, name, lat, lon, radius_m, note, status, reject_reason, created_at, reviewed_at FROM uploads WHERE user_id=? ORDER BY created_at DESC",
     )
     .bind(&user.id)
     .fetch_all(&state.pool)
@@ -69,8 +105,19 @@ pub async fn list_mine(
     Ok(Json(
         rows.into_iter()
             .map(
-                |(id, name, lat, lon, radius_m, note, status, reject_reason, created_at)| {
-                    UploadDto {
+                |(
+                    id,
+                    name,
+                    lat,
+                    lon,
+                    radius_m,
+                    note,
+                    status,
+                    reject_reason,
+                    created_at,
+                    reviewed_at,
+                )| {
+                    map_mine_row(
                         id,
                         name,
                         lat,
@@ -80,8 +127,8 @@ pub async fn list_mine(
                         status,
                         reject_reason,
                         created_at,
-                        username: None,
-                    }
+                        reviewed_at,
+                    )
                 },
             )
             .collect(),
@@ -122,6 +169,7 @@ pub async fn create(
         status: "pending".into(),
         reject_reason: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        reviewed_at: None,
         username: None,
     }))
 }
@@ -146,87 +194,59 @@ pub async fn import_csv(
         );
     }
     let bytes = bytes.ok_or_else(|| AppError::bad_request("请上传 CSV 文件"))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut rdr = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    let headers = rdr
-        .headers()
-        .map_err(|e| AppError::bad_request(format!("CSV 表头错误: {e}")))?
-        .clone();
-    let col = |names: &[&str]| -> Option<usize> {
-        headers.iter().position(|h| names.iter().any(|n| *n == h.trim()))
-    };
-    let i_name = col(&["名称", "name"]).ok_or_else(|| AppError::bad_request("缺少列：名称"))?;
-    let i_lat = col(&["纬度", "lat"]).ok_or_else(|| AppError::bad_request("缺少列：纬度"))?;
-    let i_lon = col(&["经度", "lon", "lng"]).ok_or_else(|| AppError::bad_request("缺少列：经度"))?;
-    let i_r = col(&["半径米", "radius", "radius_m"]);
-    let i_note = col(&["备注", "note"]);
+    let parsed = parse_avoid_points_csv(&bytes)?;
 
     let mut imported = 0u32;
-    let mut errors = Vec::new();
-    for (idx, rec) in rdr.records().enumerate() {
-        let line = idx + 2;
-        let rec = match rec {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(format!("第{line}行: {e}"));
-                continue;
-            }
-        };
-        let name = rec.get(i_name).unwrap_or("").trim().to_string();
-        if name.is_empty() {
-            errors.push(format!("第{line}行: 名称为空"));
-            continue;
-        }
-        let lat: f64 = match rec.get(i_lat).unwrap_or("").trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                errors.push(format!("第{line}行: 纬度无效"));
-                continue;
-            }
-        };
-        let lon: f64 = match rec.get(i_lon).unwrap_or("").trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                errors.push(format!("第{line}行: 经度无效"));
-                continue;
-            }
-        };
-        let radius: f64 = i_r
-            .and_then(|i| rec.get(i))
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(80.0);
-        if let Err(e) = validate(lat, lon, radius) {
-            errors.push(format!("第{line}行: {}", e.message));
-            continue;
-        }
-        let note = i_note
-            .and_then(|i| rec.get(i))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+    let mut errors = parsed.errors;
+    for row in parsed.rows {
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO uploads (id, user_id, name, lat, lon, radius_m, note, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
         )
         .bind(&id)
         .bind(&user.id)
-        .bind(&name)
-        .bind(lat)
-        .bind(lon)
-        .bind(radius)
-        .bind(&note)
+        .bind(&row.name)
+        .bind(row.lat)
+        .bind(row.lon)
+        .bind(row.radius_m)
+        .bind(&row.note)
         .execute(&state.pool)
-        .await?;
-        imported += 1;
+        .await
+        {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                tracing::error!("upload import insert failed line {}: {e}", row.line);
+                errors.push(crate::csv_import::RowError {
+                    line: row.line,
+                    message: "写入数据库失败".into(),
+                });
+            }
+        }
     }
     Ok(Json(serde_json::json!({ "imported": imported, "errors": errors })))
 }
 
-pub async fn list_pending(
+pub async fn list_admin(
     State(state): State<AppState>,
     _admin: AdminUser,
+    Query(q): Query<AdminListQuery>,
 ) -> Result<Json<Vec<UploadDto>>, AppError> {
+    let status = q
+        .status
+        .as_deref()
+        .unwrap_or("pending")
+        .trim()
+        .to_ascii_lowercase();
+    let status = match status.as_str() {
+        "pending" | "approved" | "rejected" | "all" => status,
+        "" => "pending".into(),
+        _ => {
+            return Err(AppError::bad_request(
+                "status 须为 pending / approved / rejected / all",
+            ));
+        }
+    };
+
     let rows: Vec<(
         String,
         String,
@@ -237,18 +257,44 @@ pub async fn list_pending(
         String,
         Option<String>,
         String,
+        Option<String>,
         String,
-    )> = sqlx::query_as(
-        r#"SELECT u.id, u.name, u.lat, u.lon, u.radius_m, u.note, u.status, u.reject_reason, u.created_at, us.username
-           FROM uploads u JOIN users us ON us.id = u.user_id
-           WHERE u.status = 'pending' ORDER BY u.created_at ASC"#,
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    )> = if status == "all" {
+        sqlx::query_as(
+            r#"SELECT u.id, u.name, u.lat, u.lon, u.radius_m, u.note, u.status, u.reject_reason, u.created_at, u.reviewed_at, us.username
+               FROM uploads u JOIN users us ON us.id = u.user_id
+               ORDER BY u.created_at DESC"#,
+        )
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"SELECT u.id, u.name, u.lat, u.lon, u.radius_m, u.note, u.status, u.reject_reason, u.created_at, u.reviewed_at, us.username
+               FROM uploads u JOIN users us ON us.id = u.user_id
+               WHERE u.status = ?
+               ORDER BY CASE WHEN u.status = 'pending' THEN 0 ELSE 1 END, u.created_at DESC"#,
+        )
+        .bind(&status)
+        .fetch_all(&state.pool)
+        .await?
+    };
+
     Ok(Json(
         rows.into_iter()
             .map(
-                |(id, name, lat, lon, radius_m, note, status, reject_reason, created_at, username)| {
+                |(
+                    id,
+                    name,
+                    lat,
+                    lon,
+                    radius_m,
+                    note,
+                    status,
+                    reject_reason,
+                    created_at,
+                    reviewed_at,
+                    username,
+                )| {
                     UploadDto {
                         id,
                         name,
@@ -259,6 +305,7 @@ pub async fn list_pending(
                         status,
                         reject_reason,
                         created_at,
+                        reviewed_at,
                         username: Some(username),
                     }
                 },

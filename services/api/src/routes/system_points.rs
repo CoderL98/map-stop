@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AdminUser, AppState, AuthUser};
+use crate::csv_import::parse_avoid_points_csv;
 use crate::error::AppError;
 
 #[derive(Serialize)]
@@ -203,84 +204,34 @@ pub async fn import_csv(
         }
     }
     let bytes = bytes.ok_or_else(|| AppError::bad_request("请上传 CSV 文件"))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut rdr = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    let headers = rdr
-        .headers()
-        .map_err(|e| AppError::bad_request(format!("CSV 表头错误: {e}")))?
-        .clone();
-
-    // Support Chinese headers: 名称,纬度,经度,半径米,备注
-    let col = |names: &[&str]| -> Option<usize> {
-        headers.iter().position(|h| {
-            let h = h.trim();
-            names.iter().any(|n| *n == h)
-        })
-    };
-    let i_name = col(&["名称", "name"]).ok_or_else(|| AppError::bad_request("缺少列：名称"))?;
-    let i_lat = col(&["纬度", "lat"]).ok_or_else(|| AppError::bad_request("缺少列：纬度"))?;
-    let i_lon = col(&["经度", "lon", "lng"]).ok_or_else(|| AppError::bad_request("缺少列：经度"))?;
-    let i_r = col(&["半径米", "radius", "radius_m"]);
-    let i_note = col(&["备注", "note"]);
+    let parsed = parse_avoid_points_csv(&bytes)?;
 
     let mut imported = 0u32;
-    let mut errors = Vec::new();
-    for (idx, rec) in rdr.records().enumerate() {
-        let line = idx + 2;
-        let rec = match rec {
-            Ok(r) => r,
-            Err(e) => {
-                errors.push(format!("第{line}行: {e}"));
-                continue;
-            }
-        };
-        let name = rec.get(i_name).unwrap_or("").trim().to_string();
-        if name.is_empty() {
-            errors.push(format!("第{line}行: 名称为空"));
-            continue;
-        }
-        let lat: f64 = match rec.get(i_lat).unwrap_or("").trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                errors.push(format!("第{line}行: 纬度无效"));
-                continue;
-            }
-        };
-        let lon: f64 = match rec.get(i_lon).unwrap_or("").trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                errors.push(format!("第{line}行: 经度无效"));
-                continue;
-            }
-        };
-        let radius: f64 = i_r
-            .and_then(|i| rec.get(i))
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(80.0);
-        if let Err(e) = validate_coords(lat, lon, radius) {
-            errors.push(format!("第{line}行: {}", e.message));
-            continue;
-        }
-        let note = i_note
-            .and_then(|i| rec.get(i))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+    let mut errors = parsed.errors;
+    for row in parsed.rows {
         let id = Uuid::new_v4().to_string();
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO system_points (id, name, lat, lon, radius_m, note, enabled, created_by) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
         )
         .bind(&id)
-        .bind(&name)
-        .bind(lat)
-        .bind(lon)
-        .bind(radius)
-        .bind(&note)
+        .bind(&row.name)
+        .bind(row.lat)
+        .bind(row.lon)
+        .bind(row.radius_m)
+        .bind(&row.note)
         .bind(&admin.0.id)
         .execute(&state.pool)
-        .await?;
-        imported += 1;
+        .await
+        {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                tracing::error!("import insert failed line {}: {e}", row.line);
+                errors.push(crate::csv_import::RowError {
+                    line: row.line,
+                    message: "写入数据库失败".into(),
+                });
+            }
+        }
     }
 
     Ok(Json(serde_json::json!({
