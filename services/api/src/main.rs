@@ -42,10 +42,17 @@ async fn main() -> anyhow::Result<()> {
     let (a, b, c, d) = graph.bounds();
     tracing::info!("demo bounds: ({a},{b}) – ({c},{d})");
 
+    let http = reqwest::Client::builder()
+        .user_agent("map-stop/0.1")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("http client");
     let state = AppState {
         pool,
         jwt_secret: cfg.jwt_secret.clone(),
         graph,
+        http,
+        geocode_limiter: crate::routes::geocode::GeocodeLimiter::default(),
     };
 
     let cors = if cfg.cors_origin == "*" {

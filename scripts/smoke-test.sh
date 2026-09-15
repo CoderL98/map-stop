@@ -11,6 +11,11 @@ TOKEN=$(curl -sf -X POST "$API/auth/login" -H 'Content-Type: application/json' \
   -d '{"login":"admin","password":"admin123"}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 AUTH="Authorization: Bearer $TOKEN"
 
+echo "== geocode =="
+curl -sf "$API/geocode?q=%E6%96%AD%E6%A1%A5&limit=2" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); assert len(d)>=1, d; print("ok hits=%s first=%s" % (len(d), d[0].get("display_name","")[:60]))'
+echo
+
 echo "== create system avoid =="
 curl -sf -X POST "$API/system-points" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"name":"烟测禁区","lat":30.26,"lon":120.15,"radius_m":200,"enabled":true}'

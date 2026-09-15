@@ -84,6 +84,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub jwt_secret: String,
     pub graph: std::sync::Arc<crate::routing::RoadGraph>,
+    pub http: reqwest::Client,
+    pub geocode_limiter: crate::routes::geocode::GeocodeLimiter,
 }
 
 impl FromRequestParts<AppState> for AuthUser {

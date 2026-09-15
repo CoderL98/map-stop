@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod custom_points;
+pub mod geocode;
 pub mod plan;
 pub mod system_points;
 pub mod uploads;
@@ -41,5 +42,6 @@ pub fn api_router(state: AppState) -> Router {
         .route("/admin/uploads/{id}/reject", post(uploads::reject))
         .route("/plan", post(plan::plan_route))
         .route("/meta/demo-bounds", get(plan::demo_bounds))
+        .route("/geocode", get(geocode::geocode))
         .with_state(state)
 }

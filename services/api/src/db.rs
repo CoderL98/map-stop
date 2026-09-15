@@ -136,9 +136,11 @@ pub async fn seed_demo_points(pool: &SqlitePool) -> Result<(), AppError> {
     if count.0 > 0 {
         return Ok(());
     }
+    // Inside Hangzhou demo bbox (~30.20–30.32N, 120.08–120.22E), radii 80–150m
     let demos = [
-        ("断桥附近演示禁区", 30.2585, 120.1480, 100.0, Some("首次启动示例，可删")),
-        ("苏堤北口演示禁区", 30.2500, 120.1400, 120.0, Some("首次启动示例，可删")),
+        ("断桥附近施工", 30.2585, 120.1480, 100.0, Some("首次启动示例系统点，可在管理端删除")),
+        ("苏堤南口临时管制", 30.2450, 120.1420, 120.0, Some("首次启动示例系统点，可在管理端删除")),
+        ("岳庙东侧围挡", 30.2525, 120.1385, 90.0, Some("首次启动示例系统点，可在管理端删除")),
     ];
     for (name, lat, lon, r, note) in demos {
         let id = Uuid::new_v4().to_string();

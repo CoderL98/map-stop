@@ -46,3 +46,25 @@ export type PlanResult = {
 		polyline: [number, number][];
 	};
 };
+
+export type DemoBounds = {
+	region: string;
+	engine: string;
+	hard_avoid: boolean;
+	bounds: {
+		lat_min: number;
+		lon_min: number;
+		lat_max: number;
+		lon_max: number;
+	};
+	center: { lat: number; lon: number };
+	note: string;
+};
+
+export type GeocodeHit = {
+	display_name: string;
+	lat: number;
+	lon: number;
+	name?: string | null;
+	typ?: string | null;
+};
