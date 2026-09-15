@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import type { UploadItem, RoutingMeta} from '$lib/types';
-	import type { Map as LMap, Circle, Marker } from 'leaflet';
+	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import type { UploadItem } from '$lib/types';
+	import type { Circle, Marker } from 'leaflet';
 
 	type StatusTab = 'pending' | 'approved' | 'rejected' | 'all';
 
@@ -15,11 +16,13 @@
 	let activeId = $state<string | null>(null);
 
 	let mapEl: HTMLDivElement;
-	let map: LMap | null = null;
+	let host: MapHost | null = null;
+	let mapKind = $state<MapKind>('leaflet');
+	let crsLabel = $state('CRS 未知');
+
 	let previewCircle: Circle | null = null;
 	let previewMarker: Marker | null = null;
-	let Lref: typeof import('leaflet') | null = null;
-	let crsLabel = $state('CRS 未知');
+	let amapPreviewOverlays: any[] = [];
 
 	const pendingIds = $derived(items.filter((i) => i.status === 'pending').map((i) => i.id));
 	const selectedPending = $derived(pendingIds.filter((id) => selected[id]));
@@ -34,35 +37,23 @@
 	});
 
 	onDestroy(() => {
-		map?.remove();
+		host?.destroy();
 	});
 
 	async function initMap() {
-		const L = (await import('leaflet')).default;
-		Lref = L as unknown as typeof import('leaflet');
-		await import('leaflet/dist/leaflet.css');
-		// @ts-expect-error leaflet icon hack
-		delete L.Icon.Default.prototype._getIconUrl;
-		L.Icon.Default.mergeOptions({
-			iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-			iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-			shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
-		});
-		map = L.map(mapEl).setView([30.26, 120.15], 13);
-		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-			maxZoom: 19,
-			attribution: '&copy; OpenStreetMap · ' + crsLabel
-		}).addTo(map);
-		try {
-			const meta = await api<RoutingMeta>('/meta/routing');
-			crsLabel = `CRS ${meta.crs} · ${meta.provider}`;
-		} catch { /* ignore */ }
+		host = await createMapHost(mapEl);
+		mapKind = host.kind;
+		crsLabel = host.crsLabel;
 	}
 
-	function showOnMap(it: UploadItem) {
-		const L = Lref;
-		if (!L || !map) return;
-		activeId = it.id;
+	function clearPreview() {
+		if (mapKind === 'amap' && host?.amap) {
+			if (amapPreviewOverlays.length) {
+				host.amap.remove(amapPreviewOverlays);
+				amapPreviewOverlays = [];
+			}
+			return;
+		}
 		if (previewCircle) {
 			previewCircle.remove();
 			previewCircle = null;
@@ -71,6 +62,36 @@
 			previewMarker.remove();
 			previewMarker = null;
 		}
+	}
+
+	function showOnMap(it: UploadItem) {
+		activeId = it.id;
+		clearPreview();
+
+		if (mapKind === 'amap' && host?.amap && host.AMap) {
+			const AMap = host.AMap;
+			const marker = new AMap.Marker({
+				position: [it.lon, it.lat],
+				title: it.name,
+				map: host.amap
+			});
+			const circle = new AMap.Circle({
+				center: [it.lon, it.lat],
+				radius: it.radius_m,
+				strokeColor: '#c62828',
+				fillColor: '#ef5350',
+				fillOpacity: 0.2,
+				strokeWeight: 2
+			});
+			circle.setMap(host.amap);
+			amapPreviewOverlays = [marker, circle];
+			host.amap.setZoomAndCenter(15, [it.lon, it.lat]);
+			return;
+		}
+
+		const L = host?.L;
+		const map = host?.map;
+		if (!L || !map) return;
 		previewMarker = L.marker([it.lat, it.lon]).addTo(map).bindTooltip(it.name);
 		previewCircle = L.circle([it.lat, it.lon], {
 			radius: it.radius_m,
@@ -266,7 +287,11 @@
 
 	<div class="card">
 		<h3 style="margin-top:0;">选中项地图</h3>
-		<p class="muted">点击名称可在地图上预览点与半径。</p>
+		<p class="muted">
+			点击名称可在地图上预览点与半径。
+			{crsLabel} · 底图 {mapKind === 'amap' ? '高德 JS' : 'Leaflet/OSM'}
+			{#if mapKind === 'amap'}（GCJ-02）{/if}
+		</p>
 		<div class="map map-sm" bind:this={mapEl}></div>
 	</div>
 </div>

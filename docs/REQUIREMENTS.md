@@ -147,7 +147,7 @@ Rust API
 ### 6.1 前端
 
 - **SvelteKit** + **pnpm**
-- 规划页：有 `AMAP_JS_KEY` 时用 **高德 JS API 2.0**；否则 Leaflet + OSM（标注 CRS）
+- 规划 / 管理 / 上传页：有 `AMAP_JS_KEY` 时用 **高德 JS API 2.0**；否则 Leaflet + OSM（标注 CRS）
 - 地名搜索：gaode 模式走高德输入提示/地理编码；embedded 走 Nominatim 代理
 - 只请求自家 Rust API；通过 `GET /api/meta/routing` 获知 provider / CRS / JS Key
 

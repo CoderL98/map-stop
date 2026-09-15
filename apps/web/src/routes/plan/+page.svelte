@@ -2,6 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken } from '$lib/api';
 	import { loadAmap } from '$lib/amap';
+	import { shouldUseAmap, fetchRoutingMeta } from '$lib/map-host';
 	import type { CustomPoint, GeocodeHit, PlanResult, RoutingMeta, SystemPoint } from '$lib/types';
 	import type { Map as LMap, LayerGroup, Polyline, Marker, Rectangle } from 'leaflet';
 
@@ -53,21 +54,9 @@
 			return;
 		}
 
-		try {
-			routingMeta = await api<RoutingMeta>('/meta/routing');
-		} catch {
-			try {
-				routingMeta = await api<RoutingMeta>('/meta/demo-bounds');
-			} catch {
-				/* ignore */
-			}
-		}
+		routingMeta = await fetchRoutingMeta();
 
-		const useAmap =
-			!!routingMeta?.amap_js_key &&
-			(routingMeta.provider === 'gaode' || !!routingMeta.amap_configured);
-
-		if (useAmap && routingMeta?.amap_js_key) {
+		if (shouldUseAmap(routingMeta) && routingMeta?.amap_js_key) {
 			mapKind = 'amap';
 			try {
 				AMapRef = await loadAmap({

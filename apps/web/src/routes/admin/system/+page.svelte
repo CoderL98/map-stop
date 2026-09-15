@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken, getUser } from '$lib/api';
-	import type { ImportResult, SystemPoint, RoutingMeta} from '$lib/types';
-	import type { Map as LMap, LayerGroup, Circle, Marker } from 'leaflet';
+	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import type { ImportResult, SystemPoint } from '$lib/types';
+	import type { LayerGroup, Circle, Marker } from 'leaflet';
 
 	let points = $state<SystemPoint[]>([]);
 	let name = $state('');
@@ -27,12 +28,20 @@
 	let editEnabled = $state(true);
 
 	let mapEl: HTMLDivElement;
-	let map: LMap | null = null;
+	let host: MapHost | null = null;
+	let mapKind = $state<MapKind>('leaflet');
+	let crsLabel = $state('CRS 未知');
+
+	// Leaflet
 	let avoidLayer: LayerGroup | null = null;
 	let pickMarker: Marker | null = null;
-	let Lref: typeof import('leaflet') | null = null;
-	let crsLabel = $state('CRS 未知');
 	let circleById = new Map<string, Circle>();
+
+	// AMap
+	let amapAvoidOverlays: any[] = [];
+	let amapPickMarker: any = null;
+	let amapInfo: any = null;
+	let amapCircleById = new Map<string, any>();
 
 	const filtered = $derived(
 		points.filter((p) => {
@@ -59,41 +68,52 @@
 	});
 
 	onDestroy(() => {
-		map?.remove();
+		host?.destroy();
 	});
 
 	async function initMap() {
-		const L = (await import('leaflet')).default;
-		Lref = L as unknown as typeof import('leaflet');
-		await import('leaflet/dist/leaflet.css');
-		// @ts-expect-error leaflet icon hack
-		delete L.Icon.Default.prototype._getIconUrl;
-		L.Icon.Default.mergeOptions({
-			iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-			iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-			shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
-		});
-		map = L.map(mapEl).setView([30.26, 120.15], 13);
-		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-			maxZoom: 19,
-			attribution: '&copy; OpenStreetMap · ' + crsLabel
-		}).addTo(map);
-		avoidLayer = L.layerGroup().addTo(map);
-		try {
-			const meta = await api<RoutingMeta>('/meta/routing');
-			crsLabel = `CRS ${meta.crs} · ${meta.provider}`;
-			map.attributionControl?.setPrefix('');
-			// force refresh attribution text by re-adding layer note
-		} catch { /* ignore */ }
-		map.on('click', (e) => {
-			lat = Number(e.latlng.lat.toFixed(6));
-			lon = Number(e.latlng.lng.toFixed(6));
-			redrawPick();
-		});
+		host = await createMapHost(mapEl);
+		mapKind = host.kind;
+		crsLabel = host.crsLabel;
+
+		if (host.kind === 'amap' && host.amap) {
+			host.amap.on('click', (e: any) => {
+				lat = Number(e.lnglat.getLat().toFixed(6));
+				lon = Number(e.lnglat.getLng().toFixed(6));
+				redrawPick();
+			});
+		} else if (host.map && host.L) {
+			avoidLayer = host.L.layerGroup().addTo(host.map);
+			host.map.on('click', (e) => {
+				lat = Number(e.latlng.lat.toFixed(6));
+				lon = Number(e.latlng.lng.toFixed(6));
+				redrawPick();
+			});
+		}
 	}
 
 	function redrawPick() {
-		const L = Lref;
+		if (mapKind === 'amap' && host?.amap && host.AMap) {
+			const AMap = host.AMap;
+			if (amapPickMarker) {
+				amapPickMarker.setPosition([lon, lat]);
+			} else {
+				amapPickMarker = new AMap.Marker({
+					position: [lon, lat],
+					draggable: true,
+					title: '新建点位置',
+					map: host.amap
+				});
+				amapPickMarker.on('dragend', () => {
+					const p = amapPickMarker.getPosition();
+					lat = Number(p.getLat().toFixed(6));
+					lon = Number(p.getLng().toFixed(6));
+				});
+			}
+			return;
+		}
+		const L = host?.L;
+		const map = host?.map;
 		if (!L || !map) return;
 		if (pickMarker) {
 			pickMarker.setLatLng([lat, lon]);
@@ -108,7 +128,12 @@
 	}
 
 	function redrawAvoids() {
-		const L = Lref;
+		if (mapKind === 'amap' && host?.amap && host.AMap) {
+			redrawAmapAvoids();
+			return;
+		}
+		const L = host?.L;
+		const map = host?.map;
 		if (!L || !avoidLayer || !map) return;
 		avoidLayer.clearLayers();
 		circleById.clear();
@@ -129,6 +154,35 @@
 		}
 		if (bounds.length > 0) {
 			map.fitBounds(bounds as [number, number][], { padding: [30, 30], maxZoom: 15 });
+		}
+		redrawPick();
+	}
+
+	function redrawAmapAvoids() {
+		const AMap = host!.AMap;
+		const amap = host!.amap;
+		if (amapAvoidOverlays.length) {
+			amap.remove(amapAvoidOverlays);
+			amapAvoidOverlays = [];
+		}
+		amapCircleById.clear();
+		for (const p of points) {
+			const color = p.enabled ? '#c62828' : '#94a3b8';
+			const c = new AMap.Circle({
+				center: [p.lon, p.lat],
+				radius: p.radius_m,
+				strokeColor: color,
+				strokeWeight: 2,
+				fillColor: color,
+				fillOpacity: p.enabled ? 0.18 : 0.08
+			});
+			c.setMap(amap);
+			c.setExtData({ id: p.id, name: p.name, radius_m: p.radius_m });
+			amapAvoidOverlays.push(c);
+			amapCircleById.set(p.id, c);
+		}
+		if (amapAvoidOverlays.length) {
+			amap.setFitView(amapAvoidOverlays, false, [30, 30, 30, 30], 15);
 		}
 		redrawPick();
 	}
@@ -165,11 +219,7 @@
 		editRadius = p.radius_m;
 		editNote = p.note || '';
 		editEnabled = p.enabled;
-		const c = circleById.get(p.id);
-		if (c && map) {
-			map.panTo([p.lat, p.lon]);
-			c.openTooltip();
-		}
+		focusOn(p);
 	}
 
 	async function saveEdit(e: Event) {
@@ -240,6 +290,19 @@
 	}
 
 	function focusOn(p: SystemPoint) {
+		if (mapKind === 'amap' && host?.amap && host.AMap) {
+			host.amap.setZoomAndCenter(15, [p.lon, p.lat]);
+			if (amapInfo) {
+				amapInfo.close();
+			}
+			amapInfo = new host.AMap.InfoWindow({
+				content: `<strong>${p.name}</strong>（${p.radius_m}m）`,
+				offset: new host.AMap.Pixel(0, -20)
+			});
+			amapInfo.open(host.amap, [p.lon, p.lat]);
+			return;
+		}
+		const map = host?.map;
 		if (!map) return;
 		map.panTo([p.lat, p.lon]);
 		circleById.get(p.id)?.openTooltip();
@@ -260,7 +323,7 @@
 				<div style="width:100px;"><label>半径米</label><input type="number" bind:value={radius_m} required min="1" /></div>
 			</div>
 			<div><label>备注</label><input bind:value={note} /></div>
-			<p class="muted">点击下方地图可填充新建点的经纬度；可拖动蓝色标记微调。</p>
+			<p class="muted">点击下方地图可填充新建点的经纬度；可拖动标记微调。</p>
 			<button type="submit">新增系统点</button>
 		</form>
 		<div class="row" style="margin-top:1rem;">
@@ -281,6 +344,13 @@
 
 	<div class="card">
 		<h3 style="margin-top:0;">地图预览</h3>
+		<p class="muted">
+			{crsLabel}
+			· 底图 {mapKind === 'amap' ? '高德 JS' : 'Leaflet/OSM'}
+			{#if mapKind === 'amap'}
+				（请用本页点选，勿粘贴未转换的 WGS84/OSM 坐标）
+			{/if}
+		</p>
 		<div class="map map-sm" bind:this={mapEl}></div>
 	</div>
 

@@ -8,7 +8,7 @@
 
 | 层 | 选型 |
 |----|------|
-| 前端 | SvelteKit + pnpm + TypeScript；规划页优先 **高德 JS API 2.0**（有 Key 时），否则 Leaflet + OSM |
+| 前端 | SvelteKit + pnpm + TypeScript；规划 / 管理 / 上传页优先 **高德 JS API 2.0**（有 `AMAP_JS_KEY` 时），否则 Leaflet + OSM |
 | 后端 | Rust (axum) + SQLite + JWT + argon2 |
 | 算路 | 可插拔 `RoutingProvider`：`gaode`（默认有 Key）/ `embedded`（杭州网格 A*）/ `opensource`（二期 stub） |
 | 地名搜索 | 高德输入提示/地理编码（gaode）或 Nominatim 代理（embedded） |

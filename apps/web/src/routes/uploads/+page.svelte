@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { api, getToken } from '$lib/api';
-	import type { DemoBounds, ImportResult, UploadItem, RoutingMeta} from '$lib/types';
-	import type { Map as LMap, Marker, Rectangle } from 'leaflet';
+	import { createMapHost, type MapHost, type MapKind } from '$lib/map-host';
+	import type { ImportResult, UploadItem } from '$lib/types';
+	import type { Marker, Rectangle } from 'leaflet';
 
 	let items = $state<UploadItem[]>([]);
 	let name = $state('');
@@ -17,12 +18,15 @@
 	let statusFilter = $state<'all' | 'pending' | 'approved' | 'rejected'>('all');
 
 	let mapEl: HTMLDivElement;
-	let map: LMap | null = null;
-	let pickMarker: Marker | null = null;
-	let boundsRect: Rectangle | null = null;
-	let Lref: typeof import('leaflet') | null = null;
+	let host: MapHost | null = null;
+	let mapKind = $state<MapKind>('leaflet');
 	let crsLabel = $state('CRS 未知');
 	let boundsNote = $state('');
+
+	let pickMarker: Marker | null = null;
+	let boundsRect: Rectangle | null = null;
+	let amapPickMarker: any = null;
+	let amapBoundsRect: any = null;
 
 	const filtered = $derived(
 		statusFilter === 'all' ? items : items.filter((i) => i.status === statusFilter)
@@ -38,62 +42,102 @@
 	});
 
 	onDestroy(() => {
-		map?.remove();
+		host?.destroy();
 	});
 
 	async function initMap() {
-		const L = (await import('leaflet')).default;
-		Lref = L as unknown as typeof import('leaflet');
-		await import('leaflet/dist/leaflet.css');
-		// @ts-expect-error leaflet icon hack
-		delete L.Icon.Default.prototype._getIconUrl;
-		L.Icon.Default.mergeOptions({
-			iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-			iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-			shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'
-		});
-		map = L.map(mapEl).setView([30.26, 120.15], 13);
-		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-			maxZoom: 19,
-			attribution: '&copy; OpenStreetMap · ' + crsLabel
-		}).addTo(map);
-		try {
-			const meta = await api<RoutingMeta>('/meta/routing');
-			crsLabel = `CRS ${meta.crs} · ${meta.provider}`;
-		} catch { /* ignore */ }
-		map.on('click', (e) => {
-			lat = Number(e.latlng.lat.toFixed(6));
-			lon = Number(e.latlng.lng.toFixed(6));
-			redrawPick();
-		});
-		try {
-			const meta = await api<DemoBounds>('/meta/demo-bounds');
-			boundsNote = `${meta.region} — ${meta.note}`;
-			const b = meta.bounds;
-			boundsRect = L.rectangle(
-				[
-					[b.lat_min, b.lon_min],
-					[b.lat_max, b.lon_max]
-				],
-				{
-					color: '#1565c0',
-					weight: 2,
-					dashArray: '6 4',
-					fillColor: '#42a5f5',
-					fillOpacity: 0.06
-				}
-			)
-				.bindTooltip('演示路网有效范围')
-				.addTo(map);
-			map.fitBounds(boundsRect.getBounds(), { padding: [20, 20] });
-		} catch {
-			/* ignore */
+		host = await createMapHost(mapEl);
+		mapKind = host.kind;
+		crsLabel = host.crsLabel;
+
+		if (host.meta) {
+			boundsNote = `${host.meta.region} — ${host.meta.note}`;
+		}
+
+		if (host.kind === 'amap' && host.amap) {
+			host.amap.on('click', (e: any) => {
+				lat = Number(e.lnglat.getLat().toFixed(6));
+				lon = Number(e.lnglat.getLng().toFixed(6));
+				redrawPick();
+			});
+			maybeDrawDemoBoundsAmap();
+		} else if (host.map && host.L) {
+			host.map.on('click', (e) => {
+				lat = Number(e.latlng.lat.toFixed(6));
+				lon = Number(e.latlng.lng.toFixed(6));
+				redrawPick();
+			});
+			maybeDrawDemoBoundsLeaflet();
 		}
 		redrawPick();
 	}
 
+	function maybeDrawDemoBoundsLeaflet() {
+		const meta = host?.meta;
+		const L = host?.L;
+		const map = host?.map;
+		if (!meta?.bounds || !L || !map) return;
+		if (meta.provider !== 'embedded') return;
+		const b = meta.bounds;
+		boundsRect = L.rectangle(
+			[
+				[b.lat_min, b.lon_min],
+				[b.lat_max, b.lon_max]
+			],
+			{
+				color: '#1565c0',
+				weight: 2,
+				dashArray: '6 4',
+				fillColor: '#42a5f5',
+				fillOpacity: 0.06
+			}
+		)
+			.bindTooltip('演示路网有效范围')
+			.addTo(map);
+		map.fitBounds(boundsRect.getBounds(), { padding: [20, 20] });
+	}
+
+	function maybeDrawDemoBoundsAmap() {
+		const meta = host?.meta;
+		const AMap = host?.AMap;
+		const amap = host?.amap;
+		if (!meta?.bounds || !AMap || !amap) return;
+		if (meta.provider !== 'embedded') return;
+		const b = meta.bounds;
+		amapBoundsRect = new AMap.Rectangle({
+			bounds: new AMap.Bounds([b.lon_min, b.lat_min], [b.lon_max, b.lat_max]),
+			strokeColor: '#1565c0',
+			strokeWeight: 2,
+			strokeStyle: 'dashed',
+			fillColor: '#42a5f5',
+			fillOpacity: 0.06
+		});
+		amapBoundsRect.setMap(amap);
+		amap.setFitView([amapBoundsRect]);
+	}
+
 	function redrawPick() {
-		const L = Lref;
+		if (mapKind === 'amap' && host?.amap && host.AMap) {
+			const AMap = host.AMap;
+			if (amapPickMarker) {
+				amapPickMarker.setPosition([lon, lat]);
+			} else {
+				amapPickMarker = new AMap.Marker({
+					position: [lon, lat],
+					draggable: true,
+					title: '候选点',
+					map: host.amap
+				});
+				amapPickMarker.on('dragend', () => {
+					const p = amapPickMarker.getPosition();
+					lat = Number(p.getLat().toFixed(6));
+					lon = Number(p.getLng().toFixed(6));
+				});
+			}
+			return;
+		}
+		const L = host?.L;
+		const map = host?.map;
 		if (!L || !map) return;
 		if (pickMarker) {
 			pickMarker.setLatLng([lat, lon]);
@@ -191,7 +235,13 @@
 				<div style="width:100px;"><label>半径米</label><input type="number" bind:value={radius_m} required min="1" /></div>
 			</div>
 			<div><label>备注</label><input bind:value={note} /></div>
-			<p class="muted">点击地图选点，或拖动标记调整坐标。</p>
+			<p class="muted">
+				点击地图选点，或拖动标记调整坐标。
+				{crsLabel} · 底图 {mapKind === 'amap' ? '高德 JS' : 'Leaflet/OSM'}
+				{#if mapKind === 'amap'}
+					（GCJ-02：请用本页点选，勿粘贴未转换的 WGS84/OSM 坐标）
+				{/if}
+			</p>
 			<div class="map map-sm" bind:this={mapEl}></div>
 			<button type="submit">提交审核</button>
 		</form>
